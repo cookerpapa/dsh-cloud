@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@dsh-cloud/agent-residency':
-        specifier: workspace:*
-        version: link:packages/agent-residency
       '@dsh-cloud/control-store':
         specifier: workspace:*
         version: link:packages/control-store

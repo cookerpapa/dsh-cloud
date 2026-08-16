@@ -14,7 +14,7 @@ DSH Cloud is a cloud distribution around the public DeepSeek Harness packages. I
 - The DSH Web UI remains an upstream dependency. Product changes should be implemented as client plugins or profile layers before editing upstream UI code.
 - Use mature open-source infrastructure through a narrow adapter when it fits the contract; do not rebuild queues, schedulers, databases, or sandbox runtimes without a demonstrated gap.
 - This repository is pre-production. Remove obsolete paths instead of preserving compatibility with unreleased local data.
-- Treat `README.md`, `docs/architecture.md`, and `docs/pi-cloud-alignment.md` as the current topology. Acceptance reports are measured evidence, not an architectural override.
+- Follow `docs/README.md` when loading repository context. Treat `README.md`, `docs/architecture.md`, and `docs/pi-cloud-alignment.md` as the current topology. Acceptance reports are measured evidence, not an architectural override; superseded proposals belong only in Git history.
 - Do not add durable user, Session, or Workspace placement on a DSH Worker. Any healthy Worker may claim the next Run; a current `RunAttempt.worker_id` is ephemeral ownership only.
 
 ## Change rules

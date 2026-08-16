@@ -21,8 +21,9 @@ DSH Cloud therefore depends on released DSH packages and adds a Cloud profile. U
 DSH Session events, not browser deltas or a reconstructed `messages[]`, are the conversation authority. A Worker may resume a Session on another machine by loading those events through the official persistence seam.
 
 This document, the root README and `docs/pi-cloud-alignment.md` describe the
-current topology. Historical reports record what a particular build measured;
-they do not reintroduce components or routing rules removed from mainline.
+current topology. `docs/README.md` defines the documentation hierarchy.
+Historical reports record what a particular build measured; they do not
+reintroduce components or routing rules removed from mainline.
 
 ## Run scheduling
 
@@ -185,7 +186,9 @@ See [the persistence decision](decisions/tiered-session-persistence.md).
 1. PostgreSQL-native DSH Session persistence and Cloud Web profile.
 2. Remote Cube filesystem/subprocess providers; production profile has no local execution fallback.
 3. Multi-tenant authentication, PostgreSQL durable Run queue, and horizontally scalable DSH Worker pool.
-4. Persistent Workspace recovery, resumable event delivery, cancellation, and failure injection.
+4. Persistent Workspace recovery, durable-before-visible live delivery,
+   canonical Session reload after browser reconnect, cancellation, and failure
+   injection.
 5. Kubernetes deployment, autoscaling, observability, and reproducible production acceptance.
 
 The implementation deliberately ends with PostgreSQL scheduling rather than a

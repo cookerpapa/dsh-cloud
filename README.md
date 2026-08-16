@@ -90,7 +90,10 @@ pnpm test:integration
 the released DSH Web profile through the Cloud overlay before fetching the
 official frontend. CI runs both gates on every push.
 
-See [the architecture document](docs/architecture.md) for ownership and failure boundaries.
+See [the documentation map](docs/README.md) and
+[architecture document](docs/architecture.md) for ownership and failure
+boundaries. Operator-facing settings and their cross-component contracts are
+listed in [configuration](docs/configuration.md).
 The [Pi Cloud alignment review](docs/pi-cloud-alignment.md) records which
 cloud invariants are shared and why DSH-specific event persistence remains
 different.

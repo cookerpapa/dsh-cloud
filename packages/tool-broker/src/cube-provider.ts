@@ -182,8 +182,7 @@ class CubeSandboxProvider implements SandboxProvider {
   }
 
   private volumeId(tenantId: string, workspaceId: string): string {
-    const prefix = this.options.volumeDriver === 'agentdock-posix' ? 'adw-' : 'dsh-'
-    return `${prefix}${createHash('sha256').update(`${tenantId}\0${workspaceId}`).digest('hex').slice(0, 48)}`
+    return `dsh-${createHash('sha256').update(`${tenantId}\0${workspaceId}`).digest('hex').slice(0, 48)}`
   }
 
   private async ensureVolume(volumeId: string): Promise<void> {
