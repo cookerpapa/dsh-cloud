@@ -10,6 +10,7 @@
     "@dsh-cloud/control-store": "workspace:*",
     "@dsh-cloud/execution-client": "workspace:*",
     "@dsh-cloud/fs-remote": "workspace:*",
+    "@dsh-cloud/multi-agent-policy": "workspace:*",
     "@dsh-cloud/run-admission": "workspace:*",
     "@dsh-cloud/run-context": "workspace:*",
     "@dsh-cloud/run-queue": "workspace:*",

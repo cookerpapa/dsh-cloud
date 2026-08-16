@@ -433,10 +433,12 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
    * PostgreSQL again before committing any event.
    */
   bindRunAuthority(authority: RunAuthority): void {
-    const sessionId = String(authority.sessionId)
-    const frozen = Object.freeze({ ...authority })
+    this.rememberAuthority(String(authority.sessionId), authority)
+  }
+
+  private rememberAuthority(sessionId: string, authority: RunAuthority): void {
     this.boundAuthorities.delete(sessionId)
-    this.boundAuthorities.set(sessionId, frozen)
+    this.boundAuthorities.set(sessionId, Object.freeze({ ...authority }))
     while (this.boundAuthorities.size > 10_000) {
       const oldest = this.boundAuthorities.keys().next().value as string | undefined
       if (oldest === undefined) break
@@ -543,7 +545,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
     await this.ready
     const authority = this.writerAuthority(meta.id)
     await this.writeTransaction(async (client) => {
-      await this.assertControlAuthority(client, authority, meta.id)
+      await this.assertControlAuthority(client, authority, meta)
       let row: SessionRow
       if (!isMaterialized) {
         const inserted = await client.query<SessionRow>(`
@@ -599,7 +601,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       const priorProjected = safeWatermark(row.projected_through, 'projected through')
       await this.reconcileProjection(client, meta.id, priorSealed, priorProjected)
       await this.publishLiveBatches(client, meta.id, events, authority)
-      await this.assertControlAuthority(client, authority, meta.id)
+      await this.assertControlAuthority(client, authority, meta)
       const sealedThrough = await this.sealCompletedTurns(
         client,
         meta.id,
@@ -652,7 +654,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
     await this.ready
     const authority = this.writerAuthority(meta.id)
     await this.writeTransaction(async (client) => {
-      await this.assertControlAuthority(client, authority, meta.id)
+      await this.assertControlAuthority(client, authority, meta)
       const locked = await client.query<SessionRow>(`
         SELECT header, incarnation::text, revision::text, next_seq::text,
                sealed_through::text, projected_through::text,
@@ -678,7 +680,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       if (closers.length > 0) {
         await this.publishLiveBatches(client, meta.id, closers, authority)
       }
-      await this.assertControlAuthority(client, authority, meta.id)
+      await this.assertControlAuthority(client, authority, meta)
       const repairedSealedThrough = await this.sealCompletedTurns(client, meta.id, sealedThrough)
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
@@ -746,18 +748,23 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       }
       return { fence: 0 }
     }
+    // One-shot DSH subagents own independent native Session logs, but execute
+    // synchronously inside the root RunAttempt.  Preserve the root authority
+    // for detached coordinator flushes; appendBatch validates the target's
+    // durable parentSession chain before accepting any child event.
     if (String(current.sessionId) !== String(sessionId)) {
-      throw new StaleSessionWriterError(
-        `RunAttempt authority for session "${current.sessionId}" cannot write session "${sessionId}"`,
-      )
+      this.rememberAuthority(String(sessionId), current)
     }
     return { fence: current.writerFence, attemptId: current.attemptId, cloud: current }
   }
 
-  private async assertControlAuthority(client: PoolClient, incoming: WriterAuthority, id: SessionId): Promise<void> {
-    if (!this.validateControlAuthority || incoming.cloud === undefined) return
+  private async assertControlAuthority(client: PoolClient, incoming: WriterAuthority, meta: SessionHeader): Promise<void> {
+    if (incoming.cloud === undefined) return
     const authority = incoming.cloud
-    const result = await client.query(`
+    const rootSessionId = String(authority.sessionId)
+    const targetSessionId = String(meta.id)
+    if (this.validateControlAuthority) {
+      const result = await client.query(`
       SELECT 1
       WHERE EXISTS (
         SELECT 1
@@ -778,18 +785,49 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
            AND command.session_id=$5 AND command.attempt_id::text=$6
            AND command.writer_fence=$7 AND command.expires_at>now()
       )
-    `, [
-      this.namespace,
-      authority.runId,
-      authority.tenantId,
-      authority.workspaceId,
-      id,
-      authority.attemptId,
-      authority.writerFence,
-      this.attemptLeaseSeconds,
-    ])
-    if (result.rowCount !== 1) {
-      throw new StaleSessionWriterError(`session "${id}" rejected inactive or expired RunAttempt authority`)
+      `, [
+        this.namespace,
+        authority.runId,
+        authority.tenantId,
+        authority.workspaceId,
+        rootSessionId,
+        authority.attemptId,
+        authority.writerFence,
+        this.attemptLeaseSeconds,
+      ])
+      if (result.rowCount !== 1) {
+        throw new StaleSessionWriterError(`session "${targetSessionId}" rejected inactive or expired RunAttempt authority`)
+      }
+    }
+    if (targetSessionId === rootSessionId) return
+    if (meta.origin !== 'subagent' || meta.parentSession === undefined) {
+      throw new StaleSessionWriterError(
+        `RunAttempt authority for session "${rootSessionId}" cannot write unrelated session "${targetSessionId}"`,
+      )
+    }
+
+    // The target may not have a row yet, so begin at its declared parent and
+    // walk only already-committed immutable headers.  A bounded recursive CTE
+    // makes nested one-shot Workflow children valid without trusting a
+    // model-provided target id or accepting an arbitrary cross-session write.
+    const lineage = await client.query(`
+      WITH RECURSIVE ancestors(id, parent_session, depth) AS (
+        SELECT session.id, session.header->>'parentSession', 0
+          FROM ${SQL_SCHEMA}.sessions session
+         WHERE session.namespace=$1 AND session.id=$2
+        UNION ALL
+        SELECT parent.id, parent.header->>'parentSession', ancestors.depth + 1
+          FROM ancestors
+          JOIN ${SQL_SCHEMA}.sessions parent
+            ON parent.namespace=$1 AND parent.id=ancestors.parent_session
+         WHERE ancestors.depth < 63
+      )
+      SELECT 1 FROM ancestors WHERE id=$3 LIMIT 1
+    `, [this.namespace, meta.parentSession, rootSessionId])
+    if (lineage.rowCount !== 1) {
+      throw new StaleSessionWriterError(
+        `subagent session "${targetSessionId}" is not a descendant of Run session "${rootSessionId}"`,
+      )
     }
   }
 

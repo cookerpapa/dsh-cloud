@@ -21,6 +21,12 @@
     - id: cloud-run-context
       name: '@dsh-cloud/run-context'
 
+    # DSH's Workflow remains available, but its children are one-shot and
+    # read-only against the shared Workspace. Continuable delegation tools are
+    # hidden until a child owns an independent durable RunAttempt/Fence.
+    - id: cloud-multi-agent-policy
+      name: '@dsh-cloud/multi-agent-policy'
+
     # Ordinary user Agents are process-resident only while active. Once their
     # turn is durably flushed, dispose the live handle so any healthy Worker can
     # cold-resume the next Run from the shared native Session log.

@@ -244,7 +244,71 @@ integration('TieredSessionPersistence', () => {
     await ctx.sessionPersistence.create(meta)
     await expect(ctx.cloudRunContext.run(authority('another-session', 1), () =>
       ctx.sessionPersistence.append(meta.id, completedTurn())))
-      .rejects.toThrow(/cannot write session/)
+      .rejects.toThrow(/unrelated session/)
+  })
+
+  it('persists nested one-shot subagent Sessions under the root RunAttempt fence', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const root = header('multi-agent-root')
+    const child: SessionHeader = {
+      ...header('multi-agent-child'),
+      parentSession: root.id,
+      origin: 'subagent',
+      delegationDepth: 1,
+    }
+    const grandchild: SessionHeader = {
+      ...header('multi-agent-grandchild'),
+      parentSession: child.id,
+      origin: 'subagent',
+      delegationDepth: 2,
+    }
+    const rootAuthority = authority(root.id, 12)
+    const rootEvents = completedTurn()
+    const childEvents = completedTurn()
+    const grandchildEvents = completedTurn()
+
+    await ctx.cloudRunContext.run(rootAuthority, async () => {
+      await ctx.sessionPersistence.create(root)
+      await ctx.sessionPersistence.append(root.id, rootEvents)
+      await ctx.sessionPersistence.create(child)
+      await ctx.sessionPersistence.append(child.id, childEvents)
+      await ctx.sessionPersistence.create(grandchild)
+      await ctx.sessionPersistence.append(grandchild.id, grandchildEvents)
+    })
+
+    expect((await ctx.sessionPersistence.load(child.id)).meta).toEqual(child)
+    expect((await ctx.sessionPersistence.load(grandchild.id)).events).toEqual(grandchildEvents)
+
+    // DSH may flush a child batch after the AsyncLocal prompt callback has
+    // returned. The backend retains only the root authority and revalidates
+    // the durable lineage on every commit.
+    await ctx.sessionPersistence.append(child.id, completedTurn(6, 2))
+    expect((await ctx.sessionPersistence.load(child.id)).events).toHaveLength(12)
+  })
+
+  it('rejects a forged subagent lineage outside the active root Session', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const root = header('lineage-root')
+    const unrelated = header('lineage-unrelated')
+    const forged: SessionHeader = {
+      ...header('lineage-forged'),
+      parentSession: unrelated.id,
+      origin: 'subagent',
+      delegationDepth: 1,
+    }
+    await ctx.cloudRunContext.run(authority(unrelated.id, 2), async () => {
+      await ctx.sessionPersistence.create(unrelated)
+      await ctx.sessionPersistence.append(unrelated.id, completedTurn())
+    })
+    await ctx.cloudRunContext.run(authority(root.id, 3), async () => {
+      await ctx.sessionPersistence.create(root)
+      await ctx.sessionPersistence.append(root.id, completedTurn())
+      await ctx.sessionPersistence.create(forged)
+      await expect(ctx.sessionPersistence.append(forged.id, completedTurn()))
+        .rejects.toThrow(/not a descendant/)
+    })
   })
 
   it('durably closes an interrupted turn when a new Worker resumes it', async () => {

@@ -11,6 +11,7 @@ evidence that an Agent can modify a repository correctly.
 | Unit and protocol contracts | Event ordering, validation, replay and adapter behavior without external services | `pnpm test` |
 | Service integration | PostgreSQL, Kafka and Valkey persistence, Run ownership, fencing, browser durability and recovery | `pnpm test:integration` |
 | Failure semantics | Stale attempts, ambiguous dispatch, cancellation, projection rebuild and sandbox isolation | Included in `pnpm test:integration` |
+| Multi-agent contracts | Root/child Session lineage, shared fence enforcement and cloud tool-policy visibility | Included in `pnpm test:integration` |
 | Real-user journey | Public registration, Workspace and Session creation, authenticated WebSocket stream and a real model Turn | `pnpm acceptance:real-user` |
 | Concurrent real-user journey | Multi-user chat or coding tasks with latency percentiles and objective output markers | `pnpm acceptance:concurrent` |
 | Component throughput | Kafka durable producer and PostgreSQL read/write headroom on disposable targets | `pnpm benchmark:components` |

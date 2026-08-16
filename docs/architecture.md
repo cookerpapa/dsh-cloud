@@ -88,6 +88,40 @@ Session row has materialized. This closes the race in which `session.create`
 returns before the asynchronous persistence batch becomes visible to a
 different Worker.
 
+## Multi-agent boundary
+
+DSH natively supplies in-process spawn/fork providers, durable continuable
+children and a worker-thread Workflow orchestrator. DSH Cloud does not treat
+all three execution modes as equivalent. The production profile currently
+admits only a foreground Workflow whose one-shot children finish before the
+root Run commits:
+
+```text
+root RunAttempt / Lease / Workspace fence
+  -> foreground Workflow
+       -> child Session A (read-only Workspace view)
+       -> child Session B (read-only Workspace view)
+  -> parent receives results
+  -> root Run settles
+```
+
+Every child keeps its own native DSH Session log. SessionPersistence accepts a
+child write only when its immutable `parentSession` chain reaches the active
+root Session, and records the same root Attempt/fence on the child row. This
+allows arbitrary-Worker recovery and audit of delegated work without allowing
+an authority for one user Session to write an unrelated Session.
+
+Parallel children share the root Cube Volume today, so the Cloud policy makes
+them read-only (`read`/search/web remain available; `bash`/write/edit and
+recursive delegation are hidden). DSH's continuable `subagent`,
+`subagent_fork`, `send_message` and `list_agents` tools are also hidden from
+root Agents. A child that survives the parent Turn cannot safely inherit the
+parent's expiring Lease: correct background continuation requires a distinct
+queued child Run, Attempt, heartbeat and fence. Parallel coding will likewise
+require one candidate Workspace/Volume per child followed by explicit diff
+review and merge. Neither boundary is emulated with process-local handles or a
+weakened Tool Broker check.
+
 The released DSH Web event multiplexer is process-local, so each Gateway keeps
 one private upstream downlink to every healthy Worker that currently has a
 browser subscriber. Gateway merges those downlinks into one tenant-filtered

@@ -85,6 +85,9 @@ importers:
       '@dsh-cloud/fs-remote':
         specifier: workspace:*
         version: link:../../packages/fs-remote
+      '@dsh-cloud/multi-agent-policy':
+        specifier: workspace:*
+        version: link:../../packages/multi-agent-policy
       '@dsh-cloud/run-admission':
         specifier: workspace:*
         version: link:../../packages/run-admission
@@ -225,6 +228,18 @@ importers:
       '@dsh-cloud/execution-protocol':
         specifier: workspace:*
         version: link:../execution-protocol
+
+  packages/multi-agent-policy:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-agent':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(cbf229dfc63c0a156b906e9338c48589)
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(eecbbdd73e060f4c9ddf0d0bedfeef3b)
 
   packages/run-admission:
     dependencies:

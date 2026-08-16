@@ -22,7 +22,7 @@ const dshHome = process.env['DSH_HOME'] ?? join(repositoryRoot, '.data', 'dsh-ho
 /**
  * The DSH Loader resolves profile plugins from `$DSH_HOME/profiles/node_modules`.
  * Released DSH packages are healed there by DSH itself; this distribution owns
- * the two out-of-tree Cloud plugins and publishes collision-safe links before
+ * the out-of-tree Cloud plugins and publishes collision-safe links before
  * boot. Keeping this explicit makes an arbitrary external DSH_HOME work just
  * like the repository-local development home.
  */
@@ -65,6 +65,7 @@ if (process.env['DSH_CLOUD_DATABASE_URL'] === undefined) {
 
 await mkdir(dshHome, { recursive: true, mode: 0o700 })
 await exposeCloudPlugin('@dsh-cloud/run-context')
+await exposeCloudPlugin('@dsh-cloud/multi-agent-policy')
 await exposeCloudPlugin('@dsh-cloud/agent-residency')
 await exposeCloudPlugin('@dsh-cloud/run-admission')
 await exposeCloudPlugin('@dsh-cloud/execution-client')

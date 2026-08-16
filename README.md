@@ -22,6 +22,7 @@ The runnable cloud slice provides:
 - a horizontally scalable pool of short-lived DSH Agent runs; `LISTEN/NOTIFY` is only a latency hint and polling preserves correctness;
 - bounded process-local Agent residency: after an ordinary user Turn is durably flushed, DSH's public `AgentHandle` is disposed and the next Run resumes through shared SessionPersistence;
 - deployment-approved per-Session Harness profiles, with the chosen DSH Agent preset preserved across Worker handoff;
+- foreground multi-agent Workflows with lineage-checked child Session logs and read-only parallel Workspace access;
 - a shared Gateway event outlet that aggregates every healthy Worker's native downlink, so browser delivery and future Runs do not depend on user/Session placement;
 - projection watermarks that prevent live Session events from reaching a browser before Kafka and Valkey acknowledge them;
 - one stable Cube Volume per tenant Workspace, reattached to replacement KVMs.
