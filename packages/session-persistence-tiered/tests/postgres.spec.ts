@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import {
   SESSION_FORMAT_VERSION,
+  Session,
   SessionId,
   default as SessionStore,
   type SessionEvent,
@@ -381,7 +382,7 @@ integration('TieredSessionPersistence', () => {
     }
   })
 
-  it('restores the exact native Session from a compaction checkpoint plus suffix on a new Worker', async () => {
+  it('restores the effective runtime surface from a compaction baseline without reading its physical prefix', async () => {
     const namespace = `test-${randomUUID()}`
     const first = await backend(namespace)
     const meta = header('checkpoint-suffix')
@@ -399,13 +400,13 @@ integration('TieredSessionPersistence', () => {
     try {
       const checkpoint = await pool.query<{ throughSeq: string; eventCount: string }>(`
         SELECT through_seq::text AS "throughSeq", event_count::text AS "eventCount"
-        FROM dsh_cloud.session_restore_checkpoints
+        FROM dsh_cloud.session_runtime_baselines
         WHERE namespace=$1 AND session_id=$2
       `, [namespace, meta.id])
       expect(checkpoint.rows[0]).toEqual({ throughSeq: '9', eventCount: '10' })
 
-      // Damage a canonical segment wholly below the checkpoint boundary. A
-      // cold resume must not read it, proving the physical prefix is skipped.
+      // Damage a canonical segment wholly below the baseline boundary. Runtime
+      // preparation must not read it, proving the physical prefix is skipped.
       await pool.query(`
         UPDATE dsh_cloud.session_segments SET payload=$3
         WHERE namespace=$1 AND session_id=$2 AND seq_end < 10
@@ -415,9 +416,17 @@ integration('TieredSessionPersistence', () => {
     }
 
     const resumed = await backend(namespace)
-    const loaded = await resumed.ctx.cloudRunContext.run(authority(meta.id, 2), () =>
-      resumed.ctx.sessionPersistence.load(meta.id))
-    expect(loaded.events).toEqual([...compacted, ...suffix])
+    const expected = Session.create(meta.id, [...compacted, ...suffix], meta).deriveMessages()
+    const prepared = await resumed.ctx.cloudRunContext.run(authority(meta.id, 2), () =>
+      resumed.ctx.sessionPersistence.prepare(meta.id))
+    try {
+      expect(prepared.session.deriveMessages()).toEqual(expected)
+      expect(prepared.session.events.some(event => event.type === 'session/runtime-gap')).toBe(true)
+      expect(prepared.session.events.filter(event => event.type !== 'session/runtime-gap').length)
+        .toBeLessThan(compacted.length + suffix.length)
+    } finally {
+      prepared[Symbol.dispose]()
+    }
   })
 
   it('repairs an interrupted suffix after restoring a compaction checkpoint', async () => {
@@ -446,7 +455,7 @@ integration('TieredSessionPersistence', () => {
       .toEqual({ kind: 'interrupted' })
   })
 
-  it('atomically advances one restore checkpoint across repeated compactions', async () => {
+  it('atomically advances one runtime baseline across repeated compactions', async () => {
     const namespace = `test-${randomUUID()}`
     const { ctx } = await backend(namespace)
     const meta = header('checkpoint-repeated')
@@ -464,7 +473,7 @@ integration('TieredSessionPersistence', () => {
     try {
       const checkpoints = await pool.query<{ count: string; throughSeq: string }>(`
         SELECT count(*)::text AS count, max(through_seq)::text AS "throughSeq"
-        FROM dsh_cloud.session_restore_checkpoints
+        FROM dsh_cloud.session_runtime_baselines
         WHERE namespace=$1 AND session_id=$2
       `, [namespace, meta.id])
       expect(checkpoints.rows[0]).toEqual({ count: '1', throughSeq: '19' })
@@ -475,7 +484,7 @@ integration('TieredSessionPersistence', () => {
       .toEqual([...firstCompaction, ...secondTurn, ...secondCompaction])
   })
 
-  it('falls back to the canonical log when derived checkpoint bytes are damaged', async () => {
+  it('falls back to the canonical log when derived runtime baseline bytes are damaged', async () => {
     const namespace = `test-${randomUUID()}`
     const first = await backend(namespace)
     const meta = header('checkpoint-fallback')
@@ -489,7 +498,7 @@ integration('TieredSessionPersistence', () => {
     const pool = new Pool({ connectionString: databaseUrl as string })
     try {
       await pool.query(`
-        UPDATE dsh_cloud.session_restore_checkpoints SET payload=$3
+        UPDATE dsh_cloud.session_runtime_baselines SET payload=$3
         WHERE namespace=$1 AND session_id=$2
       `, [namespace, meta.id, Buffer.from('damaged derived checkpoint')])
     } finally {

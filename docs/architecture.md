@@ -183,14 +183,20 @@ the sealed PostgreSQL prefix plus exact live-log locations; Valkey can be rebuil
 There is no S3/MinIO dependency and no separately reconstructed `messages[]`.
 
 After a successful native DSH Compaction, the transaction also replaces one
-verified gzip restore checkpoint covering the exact append-only log through the
-Compaction boundary. A cold Worker reads that checkpoint and seeks only the
-later physical suffix. This avoids revisiting every older Turn segment while
-preserving byte-equivalent DSH events, request headers, Tool outcomes,
-Compaction provenance and plugin state. The canonical segments remain retained
-for history and as the fail-soft source if derived checkpoint validation fails.
-This is a physical restore accelerator, not logical event truncation: released
-DSH `0.1.0-rc.6` still requires a contiguous native log for Agent resume.
+verified runtime baseline through the Compaction boundary. The baseline is
+created by DSH's Session domain rather than by cloud storage: it contains the
+exact current model surface and retained plugin/runtime state, but omits raw
+assistant chunks and surface payloads shadowed by Compaction. A cold Worker
+loads this compact baseline plus only the later physical suffix; omitted
+canonical positions become tiny, ignorable Worker-local gaps so absolute event
+sequence numbers and future append cursors remain unchanged.
+
+Canonical PostgreSQL segments remain retained for human history, export, audit
+and fail-soft recovery. Gap records never enter canonical storage. If baseline
+integrity or Session-contract validation fails, the Worker reloads the full
+canonical log. DSH Cloud currently carries this generic upstream Session and
+PersistenceCoordinator contract as reviewed pnpm patches over `0.1.0-rc.6`
+until it is available in a published DSH release.
 
 The live log and projection are Cordis Service Definitions. The tiered
 SessionPersistence imports neither Kafka nor Valkey clients; deployments can

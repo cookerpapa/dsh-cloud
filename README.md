@@ -58,7 +58,7 @@ Multi-tenant Gateway
              CubeSandbox KVM provider
 ```
 
-The Session log is the model-context authority. PostgreSQL stores DSH's native events rather than a separately reconstructed `messages[]` array, so compaction, steering, tool outcomes, request headers, and interrupted-turn recovery keep upstream semantics. Successful Compaction also creates a verified native restore checkpoint; a cold Worker reads it plus only the later physical suffix while canonical Turn segments remain the audit and fallback source. Temporal is intentionally not part of this design: Pi Cloud and DSH Cloud both use PostgreSQL as the sole product-state and Run-queue authority.
+The Session log is the model-context authority. PostgreSQL stores DSH's native events rather than a separately reconstructed `messages[]` array, so compaction, steering, tool outcomes, request headers, and interrupted-turn recovery keep upstream semantics. Successful Compaction also creates a verified Session runtime baseline containing the effective surface and runtime state; a cold Worker reads it plus only the later physical suffix, while canonical Turn segments remain the human-history, audit and fallback source. Temporal is intentionally not part of this design: Pi Cloud and DSH Cloud both use PostgreSQL as the sole product-state and Run-queue authority.
 
 ## Local development
 

@@ -10,12 +10,15 @@ import {
   type SessionLiveProjection,
 } from '@dsh-cloud/session-live'
 import {
+  Session,
   decodeStorageRecord,
+  createSessionRuntimeBaseline,
   packChunkRuns,
   type SessionEvent,
   type SessionHeader,
   type SessionId,
   type SessionPreparation,
+  type SessionRuntimeBaseline,
   type StorageRecord,
 } from '@deepseek-ai/dsh-session'
 import {
@@ -43,11 +46,11 @@ export {
   type SessionEventEnvelope,
 } from '@dsh-cloud/session-live'
 
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
 const SQL_SCHEMA = 'dsh_cloud'
 const DEFAULT_NAMESPACE = 'local'
 const SEGMENT_CODEC = 'dsh-storage-records+json+gzip-v1'
-const RESTORE_CHECKPOINT_CODEC = 'dsh-native-session-log+json+gzip-v1'
+const RUNTIME_BASELINE_CODEC = 'dsh-runtime-baseline+json+gzip-v1'
 
 interface SessionRow {
   header: SessionHeader
@@ -88,7 +91,7 @@ interface EncodedSegment {
   sha256: string
 }
 
-interface RestoreCheckpointRow {
+interface RuntimeBaselineRow {
   through_seq: string
   event_count: string
   codec: string
@@ -243,31 +246,39 @@ function decodeSegment(row: SegmentRow): SessionEvent[] {
   return events
 }
 
-function encodeRestoreCheckpoint(events: readonly SessionEvent[]): EncodedSegment {
-  const first = events[0]
-  if (first === undefined || first.seq !== 0) {
-    throw new Error('Session restore checkpoint must start at seq 0')
+function encodeRuntimeBaseline(events: readonly SessionEvent[]): EncodedSegment {
+  const baseline = createSessionRuntimeBaseline(events)
+  const payload = gzipSync(Buffer.from(JSON.stringify(baseline)), { level: 6 })
+  return {
+    seq: 0,
+    seqEnd: baseline.throughSeq,
+    payload,
+    sha256: createHash('sha256').update(payload).digest('hex'),
   }
-  const encoded = encodeSegment(events)
-  return { ...encoded }
 }
 
-function decodeRestoreCheckpoint(row: RestoreCheckpointRow): SessionEvent[] {
-  if (row.codec !== RESTORE_CHECKPOINT_CODEC) {
-    throw new Error(`unsupported Session restore checkpoint codec "${row.codec}"`)
+function decodeRuntimeBaseline(row: RuntimeBaselineRow): SessionRuntimeBaseline {
+  if (row.codec !== RUNTIME_BASELINE_CODEC) {
+    throw new Error(`unsupported Session runtime baseline codec "${row.codec}"`)
   }
-  const events = decodeSegment({
-    seq: '0',
-    seq_end: row.through_seq,
-    codec: SEGMENT_CODEC,
-    payload: row.payload,
-    sha256: row.sha256,
-  })
-  const eventCount = safeInteger(row.event_count, 'restore checkpoint event count')
-  if (events.length !== eventCount) {
-    throw new Error(`corrupt Session restore checkpoint event count ${eventCount}`)
+  const digest = createHash('sha256').update(row.payload).digest('hex')
+  if (digest !== row.sha256) throw new Error('corrupt Session runtime baseline digest')
+  let value: unknown
+  try {
+    value = JSON.parse(gunzipSync(row.payload).toString('utf8'))
+  } catch (error) {
+    throw new Error('corrupt compressed Session runtime baseline', { cause: error })
   }
-  return events
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('corrupt Session runtime baseline object')
+  }
+  const baseline = value as SessionRuntimeBaseline
+  const throughSeq = safeInteger(row.through_seq, 'runtime baseline through seq')
+  const eventCount = safeInteger(row.event_count, 'runtime baseline event count')
+  if (eventCount !== throughSeq + 1 || baseline.throughSeq !== throughSeq) {
+    throw new Error(`corrupt Session runtime baseline range through ${throughSeq}`)
+  }
+  return baseline
 }
 
 function completedCompaction(events: readonly SessionEvent[]): boolean {
@@ -437,12 +448,14 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
     return this.coordinator.prepare(id, signal)
   }
 
-  load(id: SessionId): Promise<SessionInspection> {
-    return this.coordinator.load(id)
+  async load(id: SessionId): Promise<SessionInspection> {
+    const projected = await this.coordinator.load(id)
+    return this.canonicalInspection(id, projected)
   }
 
-  inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection> {
-    return this.coordinator.inspect(id, signal)
+  async inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection> {
+    const projected = await this.coordinator.inspect(id, signal)
+    return this.canonicalInspection(id, projected, signal)
   }
 
   readFrom(
@@ -460,17 +473,23 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       signal?.throwIfAborted()
       const row = await this.sessionRow(client, id)
       if (row === undefined) return undefined
-      const events = await this.loadRestoreEvents(client, id)
+      const prepared = await this.loadRuntimePreparation(client, id, row.header)
       signal?.throwIfAborted()
-      const scanned = scanRows(storageRows(events).map(item => ({
+      const expectedStart = prepared.runtimeBaseline === undefined
+        ? 0
+        : prepared.runtimeBaseline.throughSeq + 1
+      const scanned = scanRows(storageRows(prepared.events).map(item => ({
         seq: String(item.seq),
         seq_end: String(item.seqEnd),
         event: item.record,
-      })))
+      })), expectedStart)
       return {
         meta: structuredClone(row.header),
         events: scanned.events,
         revision: postgresRevision(this.storeId, this.namespace, row),
+        ...prepared.runtimeBaseline === undefined
+          ? {}
+          : { runtimeBaseline: prepared.runtimeBaseline },
         ...scanned.tornFrom === undefined ? {} : { tornMarker: scanned.tornFrom },
       }
     })
@@ -610,13 +629,13 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
         // into a persistence failure or leave the transaction aborted.
         await client.query('SAVEPOINT dsh_restore_checkpoint')
         try {
-          await this.writeRestoreCheckpoint(client, meta.id, expected + events.length)
+          await this.writeRuntimeBaseline(client, meta.id, expected + events.length)
           await client.query('RELEASE SAVEPOINT dsh_restore_checkpoint')
         } catch (error) {
           await client.query('ROLLBACK TO SAVEPOINT dsh_restore_checkpoint')
           await client.query('RELEASE SAVEPOINT dsh_restore_checkpoint')
           this.ctx.logger.warn(
-            `session "${meta.id}": restore checkpoint construction failed; canonical Compaction remains authoritative: ${String(error)}`,
+            `session "${meta.id}": runtime baseline construction failed; canonical Compaction remains authoritative: ${String(error)}`,
           )
         }
       }
@@ -820,39 +839,75 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
   }
 
   /**
-   * Restore the exact native DSH log from the latest verified checkpoint plus
-   * its physical suffix. The checkpoint is only a read accelerator: canonical
-   * Turn segments and Kafka tail locations remain the authority and are kept
-   * for audit/history reads.
+   * Return canonical history to UI/export callers even when the attached
+   * runtime was prepared from a compact baseline containing local gap records.
+   * Live coordinator-only closers or pending events are merged after the last
+   * durable event; baseline gaps themselves never cross this service boundary.
    */
-  private async loadRestoreEvents(client: PoolClient, id: SessionId): Promise<SessionEvent[]> {
-    const result = await client.query<RestoreCheckpointRow>(`
+  private async canonicalInspection(
+    id: SessionId,
+    projected: SessionInspection,
+    signal?: AbortSignal,
+  ): Promise<SessionInspection> {
+    signal?.throwIfAborted()
+    await this.ready
+    return this.readTransaction(async (client) => {
+      const row = await this.sessionRow(client, id)
+      if (row === undefined) throw new Error(`session "${id}" not found`)
+      const events = await this.loadPhysicalEvents(client, id, 0)
+      const nextSeq = safeInteger(row.next_seq, 'next seq')
+      assertContiguous(events, 0)
+      if (events.length !== nextSeq) {
+        throw new Error(`corrupt session log: canonical history ends before stored next seq ${nextSeq}`)
+      }
+      const liveSuffix = projected.events.filter(event => event.seq >= nextSeq)
+      assertContiguous(liveSuffix, nextSeq)
+      signal?.throwIfAborted()
+      return Object.freeze({
+        meta: structuredClone(projected.meta),
+        events: Object.freeze([...events, ...structuredClone(liveSuffix)]),
+      })
+    })
+  }
+
+  /**
+   * Prepare only the effective runtime surface from the latest verified
+   * baseline plus the canonical physical suffix. Canonical segments and Kafka
+   * locations remain the authority for history, export and recovery fallback.
+   */
+  private async loadRuntimePreparation(
+    client: PoolClient,
+    id: SessionId,
+    header: SessionHeader,
+  ): Promise<{ runtimeBaseline?: SessionRuntimeBaseline; events: SessionEvent[] }> {
+    const result = await client.query<RuntimeBaselineRow>(`
       SELECT through_seq::text, event_count::text, codec, payload, sha256
-      FROM ${SQL_SCHEMA}.session_restore_checkpoints
+      FROM ${SQL_SCHEMA}.session_runtime_baselines
       WHERE namespace = $1 AND session_id = $2
     `, [this.namespace, id])
     const checkpoint = result.rows[0]
-    if (checkpoint === undefined) return this.loadPhysicalEvents(client, id, 0)
+    if (checkpoint === undefined) return { events: await this.loadPhysicalEvents(client, id, 0) }
 
     try {
-      const prefix = decodeRestoreCheckpoint(checkpoint)
-      const throughSeq = safeInteger(checkpoint.through_seq, 'restore checkpoint through seq')
-      const suffix = await this.loadPhysicalEvents(client, id, throughSeq + 1)
-      const events = [...prefix, ...suffix]
-      assertContiguous(events, 0)
-      return events
+      const runtimeBaseline = decodeRuntimeBaseline(checkpoint)
+      const suffix = await this.loadPhysicalEvents(client, id, runtimeBaseline.throughSeq + 1)
+      assertContiguous(suffix, runtimeBaseline.throughSeq + 1)
+      // Validate the complete contract here so a damaged derived baseline can
+      // fall back to canonical history before the coordinator sees it.
+      Session.fromRuntimeBaseline(id, runtimeBaseline, suffix, header)
+      return { runtimeBaseline, events: suffix }
     } catch (error) {
-      // Restore checkpoints are derived acceleration data. A damaged cache must
+      // Runtime baselines are derived acceleration data. A damaged cache must
       // never make the canonical Session unavailable while its source log is sound.
       this.ctx.logger.warn(
-        `session "${id}": restore checkpoint rejected; falling back to canonical log: ${String(error)}`,
+        `session "${id}": runtime baseline rejected; falling back to canonical log: ${String(error)}`,
       )
-      return this.loadPhysicalEvents(client, id, 0)
+      return { events: await this.loadPhysicalEvents(client, id, 0) }
     }
   }
 
-  /** Materialize the latest verified full-native-log checkpoint after compaction. */
-  private async writeRestoreCheckpoint(
+  /** Materialize an effective runtime baseline after successful compaction. */
+  private async writeRuntimeBaseline(
     client: PoolClient,
     id: SessionId,
     expectedNextSeq: number,
@@ -860,13 +915,13 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
     const events = await this.loadPhysicalEvents(client, id, 0)
     if (events.length !== expectedNextSeq) {
       throw new Error(
-        `Session restore checkpoint expected ${expectedNextSeq} events, loaded ${events.length}`,
+        `Session runtime baseline expected ${expectedNextSeq} events, loaded ${events.length}`,
       )
     }
     assertContiguous(events, 0)
-    const checkpoint = encodeRestoreCheckpoint(events)
+    const checkpoint = encodeRuntimeBaseline(events)
     await client.query(`
-      INSERT INTO ${SQL_SCHEMA}.session_restore_checkpoints
+      INSERT INTO ${SQL_SCHEMA}.session_runtime_baselines
         (namespace, session_id, through_seq, event_count, codec, payload, sha256)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       ON CONFLICT (namespace, session_id) DO UPDATE
@@ -876,13 +931,13 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
           payload = EXCLUDED.payload,
           sha256 = EXCLUDED.sha256,
           created_at = now()
-      WHERE ${SQL_SCHEMA}.session_restore_checkpoints.through_seq < EXCLUDED.through_seq
+      WHERE ${SQL_SCHEMA}.session_runtime_baselines.through_seq < EXCLUDED.through_seq
     `, [
       this.namespace,
       id,
       checkpoint.seqEnd,
       events.length,
-      RESTORE_CHECKPOINT_CODEC,
+      RUNTIME_BASELINE_CODEC,
       checkpoint.payload,
       checkpoint.sha256,
     ])
@@ -1077,12 +1132,14 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
         SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton = true
       `)
       let storedVersion = schema.rows[0]?.version
-      if (storedVersion === 5) {
-        // Version 6 adds derived restore-checkpoint storage only; all canonical
-        // Session tables and bytes remain unchanged.
+      if (storedVersion === 6) {
+        // Version 7 replaces full-log restore accelerators with logical runtime
+        // baselines. Discard that derived table rather than shipping an old
+        // codec compatibility path; canonical Session data remains untouched.
+        await client.query(`DROP TABLE IF EXISTS ${SQL_SCHEMA}.session_restore_checkpoints`)
         await client.query(`
           UPDATE ${SQL_SCHEMA}.schema_state SET version = $1
-          WHERE singleton = true AND version = 5
+          WHERE singleton = true AND version = 6
         `, [SCHEMA_VERSION])
         storedVersion = SCHEMA_VERSION
       }
@@ -1163,7 +1220,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
         )
       `)
       await client.query(`
-        CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_restore_checkpoints (
+        CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_runtime_baselines (
           namespace text NOT NULL,
           session_id text NOT NULL,
           through_seq bigint NOT NULL CHECK (through_seq >= 0),

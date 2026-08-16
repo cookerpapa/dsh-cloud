@@ -1,0 +1,71 @@
+diff --git a/lib/index.js b/lib/index.js
+index 178ec2da947f243323bf4482dfe32bb29bb346de..7ee1fc55caf660828e117f37fc02ab40ed2521b3 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,5 +1,5 @@
+ import { Service } from "@deepseek-ai/cordis";
+-import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, SessionPreparation, adoptSessionEvent, interruptedTurnClosers, snapshotJsonValue, snapshotSessionEvent } from "@deepseek-ai/dsh-session";
++import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, Session, SessionPreparation, adoptSessionEvent, interruptedTurnClosers, snapshotJsonValue, snapshotSessionEvent } from "@deepseek-ai/dsh-session";
+ import { MAX_TIMER_DELAY_MS } from "@deepseek-ai/dsh-timeout";
+ //#region lib/types/revision.js
+ /** Opaque revision identity for lightweight persistence observations. */
+@@ -992,13 +992,24 @@ var PersistenceCoordinator = class {
+ 			this.assertVersion(meta);
+ 			const storedEvents = adoptStoredEvents(events, id);
+ 			this.assertEventsSupported(meta, storedEvents);
+-			const closers = interruptedTurnClosers(storedEvents).map(adoptSessionEvent);
+-			const balanced = [...storedEvents, ...closers];
+-			const session = this.ctx.sessions.prepare(id, {
+-				seed: balanced,
+-				meta,
+-				seedSource: "persistence"
+-			});
++			let session;
++			let balanced;
++			let closers;
++			if (stored.runtimeBaseline === void 0) {
++				closers = interruptedTurnClosers(storedEvents).map(adoptSessionEvent);
++				balanced = [...storedEvents, ...closers];
++				session = this.ctx.sessions.prepare(id, {
++					seed: balanced,
++					meta,
++					seedSource: "persistence"
++				});
++			} else {
++				const projected = Session.fromRuntimeBaseline(id, stored.runtimeBaseline, storedEvents, meta);
++				closers = interruptedTurnClosers(projected.events.slice(0, projected.firstLiveSeq)).map(adoptSessionEvent);
++				if (closers.length > 0) session = Session.fromRuntimeBaseline(id, stored.runtimeBaseline, [...storedEvents, ...closers], meta);
++				else session = projected;
++				balanced = session.events.slice(0, session.firstLiveSeq);
++			}
+ 			return {
+ 				inspection: Object.freeze({
+ 					meta: session.header,
+diff --git a/lib/types/coordinator.d.ts b/lib/types/coordinator.d.ts
+index 04301acda450bd855d0ed8f8ec4a7277b66771ec..5f636117edb20d424d927724c26edfa82d3d5062 100644
+--- a/lib/types/coordinator.d.ts
++++ b/lib/types/coordinator.d.ts
+@@ -6,7 +6,7 @@
+  */
+ import { Context } from '@deepseek-ai/cordis';
+ import { SessionPreparation } from '@deepseek-ai/dsh-session';
+-import type { SessionEvent, SessionId, SessionHeader } from '@deepseek-ai/dsh-session';
++import type { SessionEvent, SessionId, SessionHeader, SessionRuntimeBaseline } from '@deepseek-ai/dsh-session';
+ import type { SessionInspection, SessionLocation } from './index.ts';
+ import type { SessionPersistenceRevision } from './revision.ts';
+ /** Default number of detached session preparations retained by a coordinator. */
+@@ -67,6 +67,14 @@ export interface PersistenceCoordinatorOptions {
+  */
+ export interface StoredPrefix<TornMarker = unknown> {
+     meta: SessionHeader;
++    /**
++     * Optional runtime projection through an earlier canonical cut. When
++     * present, `events` is the canonical suffix beginning at
++     * `runtimeBaseline.throughSeq + 1`; the coordinator reconstructs a
++     * seq-preserving Worker seed with local gap records. Canonical history and
++     * `readFrom` remain backend-owned and unchanged.
++     */
++    runtimeBaseline?: SessionRuntimeBaseline;
+     events: SessionEvent[];
+     /** Revision observed for exactly this detached prefix. */
+     revision: SessionPersistenceRevision;

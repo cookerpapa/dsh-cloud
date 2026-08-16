@@ -10,7 +10,7 @@ capabilities into it:
 ```text
 Tiered SessionPersistence plugin (replaceable as a whole)
   ├─ PostgreSQL: Session metadata, semantic markers, settled Turn segments
-  ├─ PostgreSQL: latest verified native restore checkpoint after Compaction
+  ├─ PostgreSQL: latest verified Session runtime baseline after Compaction
   ├─ SessionLiveLog provider: exact unfinished native event suffix
   └─ SessionLiveProjection provider: rebuildable low-latency projection
 ```
@@ -48,33 +48,37 @@ Kafka offsets.
 ## Compaction-aware cold restore
 
 DSH Compaction replaces nodes on the model-visible surface but deliberately
-does not truncate the append-only Session Event Log. The released DSH Session
-runtime also requires a complete, contiguous log starting at sequence zero:
-Inbox, Plan, Permission, Goal and other plugins may fold native events that are
-not part of the model-visible surface. DSH Cloud therefore does not synthesize
-a smaller `messages[]` log or renumber events after Compaction.
+does not truncate the append-only Session Event Log. DSH Cloud does not
+synthesize `messages[]`, duplicate plugin folding in PostgreSQL, or renumber
+events. The Session package owns a generic, versioned runtime-baseline contract
+that projects one stable canonical cut into the exact current surface plus all
+retained non-surface runtime state.
 
-Instead, a successful `compaction/end` transaction materializes one
-SHA-256-verified, gzip-compressed checkpoint of the exact native log through
-that sequence. A cold Worker restores:
+A successful `compaction/end` transaction materializes one SHA-256-verified,
+gzip-compressed baseline through that sequence. A cold Worker restores:
 
 ```text
-latest native restore checkpoint [0..N]
-  + SessionPersistence.readFrom(N + 1) physical suffix
-  = exact original DSH Session Event Log
+Session runtime baseline through N
+  + canonical physical suffix [N+1..]
+  + Worker-local ignorable gaps for omitted seq positions
+  = equivalent Agent runtime state with the canonical append cursor
 ```
 
-The checkpoint and its Session revision advance in the same PostgreSQL
+The baseline and its Session revision advance in the same PostgreSQL
 transaction. Repeated Compactions replace the one derived checkpoint only when
-the new watermark is higher. Checkpoint construction runs behind a SQL
+the new watermark is higher. Baseline construction runs behind a SQL
 savepoint, so failure drops only this derived cache update and never rolls back
 the valid native Compaction. Canonical Turn segments and Kafka locations are not
 deleted: they remain the history/audit authority and let a corrupt checkpoint
-fail soft to a full canonical read. This bounds the number of old segments
-touched during ordinary cross-Worker restore and allows suffix seeks, but
-intentionally does not claim that the logical DSH history has been truncated. A
-truly context-sized Agent restore requires an upstream Session baseline
-contract for every plugin projection, which `0.1.0-rc.6` does not provide.
+fail soft to a full canonical read. Human `load`/`inspect`, export and
+`readFrom` therefore return canonical events, never Worker-local gaps.
+
+This contract is implemented in the upstream Session and
+PersistenceCoordinator source and carried as pnpm patches until a published
+DSH release includes it. It reduces transferred payload to the post-Compaction
+effective surface and state plus suffix. The current Session representation
+still allocates one small gap envelope per omitted absolute seq; eliminating
+that last in-memory O(event-count) cost would require a future sparse log view.
 
 ## Failure semantics
 
@@ -88,7 +92,7 @@ contract for every plugin projection, which `0.1.0-rc.6` does not provide.
 - Kafka retention expires before an interrupted Turn is sealed: recovery fails
   closed. Production retention therefore defines the maximum interrupted-Turn
   recovery horizon and defaults to 30 days.
-- Restore checkpoint validation fails: the provider logs a warning and rebuilds
+- Runtime baseline validation fails: the provider logs a warning and rebuilds
   from canonical Turn segments plus the indexed live suffix.
 
 This design intentionally avoids a PostgreSQL payload Outbox and a separate

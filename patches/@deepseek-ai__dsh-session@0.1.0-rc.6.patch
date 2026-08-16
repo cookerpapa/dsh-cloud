@@ -1,0 +1,609 @@
+diff --git a/lib/index.js b/lib/index.js
+index 1102035f375401c77adbbb1767759f75544ad05a..21b4502589197ab0ae85a8542321640bb6ed938e 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -467,10 +467,18 @@ var SurfaceManager = class {
+ 	* @param log - Contiguous complete log or loaded event window.
+ 	* @param baseSeq - Absolute sequence of the window's first event.
+ 	*/
+-	constructor(log, baseSeq = 0) {
++	constructor(log, baseSeq = 0, checkpoint) {
+ 		this.log = log;
+ 		this.baseSeq = baseSeq;
+-		this._lastProcessedSeq = baseSeq - 1;
++		if (checkpoint === void 0) {
++			this._lastProcessedSeq = baseSeq - 1;
++			return;
++		}
++		this._state = {
++			nodes: [...checkpoint.nodes],
++			replaceGeneration: checkpoint.replaceGeneration
++		};
++		this._lastProcessedSeq = checkpoint.throughSeq;
+ 	}
+ 	/**
+ 	* Validate the next candidate without mutating the committed surface.
+@@ -1078,6 +1086,7 @@ const KNOWN_SESSION_EVENT_TYPES = new Set([
+ 	"sandbox/mode",
+ 	"schedule/change",
+ 	"session/end-seed",
++	"session/runtime-gap",
+ 	"session/title",
+ 	"session/title-llm-request",
+ 	"step/end",
+@@ -1264,6 +1273,96 @@ function assertMessageEventShape(event, subject) {
+ 	if (content.length !== 1 || typeof block !== "object" || block === null || block["type"] !== "tool-result" || !Array.isArray(block["content"])) throw new Error(`${subject} message must contain one tool-result block`);
+ 	if (block["toolCallId"] !== sourceRecord["callId"]) throw new Error(`${subject} message has mismatched tool call ids`);
+ }
++/** Runtime-baseline schema version emitted by this build. */
++const SESSION_RUNTIME_BASELINE_VERSION = 1;
++/** Create one small local record for a canonical payload omitted by a baseline. */
++function runtimeGap(seq) {
++	return {
++		type: "session/runtime-gap",
++		seq,
++		time: 0,
++		data: {},
++		ignorable: true
++	};
++}
++/**
++* Project a complete canonical log into the state required to continue its
++* Agent runtime. The current surface is retained exactly; raw assistant chunks
++* and surface events shadowed by replacement are left to canonical audit
++* storage. Tool-call records are retained only when a current tool result
++* cites them, so a projected log never manufactures an unmatched old call.
++*
++* @param events - complete contiguous canonical log at a stable cut.
++* @returns a detached runtime baseline through the log's final seq.
++*/
++function createSessionRuntimeBaseline(events) {
++	for (const [index, event] of events.entries()) if (event.seq !== index) throw new Error(`runtime baseline source is not contiguous: expected seq ${index}, got ${event.seq}`);
++	const surface = foldSurface(events);
++	const surfaceNodes = new Set(surface.nodes);
++	const requiredToolCalls = /* @__PURE__ */ new Set();
++	for (const seq of surface.nodes) {
++		const event = events[seq];
++		if (event?.type !== "tool/result") continue;
++		for (const sourceSeq of event.sourceEventSeqs ?? []) requiredToolCalls.add(sourceSeq);
++	}
++	const retained = events.filter((event) => {
++		if (event.type === "assistant/chunk") return false;
++		if (event.type === "tool/call") return requiredToolCalls.has(event.seq);
++		if (isSurfaceEvent(event)) return surfaceNodes.has(event.seq);
++		return event.type !== "session/runtime-gap";
++	}).map((event) => snapshotSessionEvent(event));
++	return deepFreeze({
++		version: SESSION_RUNTIME_BASELINE_VERSION,
++		throughSeq: events.length - 1,
++		events: retained,
++		surfaceNodes: [...surface.nodes],
++		surfaceReplaceGeneration: surface.replacements.length
++	});
++}
++/**
++* Validate and materialize a baseline plus its canonical suffix. Omitted
++* payloads become local gap records, preserving the absolute seq domain while
++* avoiding their transfer from durable storage.
++*/
++function materializeSessionRuntimeBaseline(baseline, suffix) {
++	if (baseline.version !== SESSION_RUNTIME_BASELINE_VERSION) throw new Error(`unsupported session runtime baseline version ${String(baseline.version)}`);
++	if (!Number.isSafeInteger(baseline.throughSeq) || baseline.throughSeq < -1) throw new Error("session runtime baseline throughSeq must be a safe integer >= -1");
++	if (!Number.isSafeInteger(baseline.surfaceReplaceGeneration) || baseline.surfaceReplaceGeneration < 0) throw new Error("session runtime baseline replace generation must be a non-negative safe integer");
++	const events = Array.from({ length: baseline.throughSeq + 1 }, (_, seq) => runtimeGap(seq));
++	let priorRetainedSeq = -1;
++	for (const source of baseline.events) {
++		const snapshot = structuredClone(source);
++		assertSessionEventEnvelope(snapshot, source.seq);
++		if (snapshot.type === "session/runtime-gap") throw new Error("session runtime baseline cannot retain a Worker-local gap record");
++		if (source.seq <= priorRetainedSeq || source.seq > baseline.throughSeq) throw new Error(`session runtime baseline retained seq ${source.seq} is out of order or out of range`);
++		priorRetainedSeq = source.seq;
++		events[source.seq] = snapshot;
++	}
++	const seenSurface = /* @__PURE__ */ new Set();
++	for (const seq of baseline.surfaceNodes) {
++		if (!Number.isSafeInteger(seq) || seq < 0 || seq > baseline.throughSeq || seenSurface.has(seq)) throw new Error(`session runtime baseline carries invalid surface seq ${String(seq)}`);
++		seenSurface.add(seq);
++		const event = events[seq];
++		if (event === void 0 || !isSurfaceEvent(event)) throw new Error(`session runtime baseline surface seq ${seq} has no retained surface event`);
++	}
++	let expected = baseline.throughSeq + 1;
++	for (const source of suffix) {
++		const snapshot = structuredClone(source);
++		assertSessionEventEnvelope(snapshot, expected);
++		if (snapshot.type === "session/runtime-gap") throw new Error("session runtime baseline canonical suffix cannot contain a Worker-local gap record");
++		if (snapshot.seq !== expected) throw new Error(`session runtime baseline suffix expected seq ${expected}, got ${String(snapshot.seq)}`);
++		events.push(snapshot);
++		expected += 1;
++	}
++	return {
++		events,
++		surface: {
++			nodes: [...baseline.surfaceNodes],
++			replaceGeneration: baseline.surfaceReplaceGeneration,
++			throughSeq: baseline.throughSeq
++		}
++	};
++}
+ /** Whether an unknown value carries the current provider/model pair. */
+ function hasProviderModel(value) {
+ 	if (typeof value !== "object" || value === null) return false;
+@@ -1303,7 +1402,7 @@ const attachments = /* @__PURE__ */ new WeakMap();
+ var Session = class Session {
+ 	log = [];
+ 	/** Single incremental owner of surface acceptance and projection state. */
+-	surfaceManager = new SurfaceManager(this.log);
++	surfaceManager;
+ 	/** The ordered surface over this session's event log. */
+ 	get surface() {
+ 		return this.surfaceManager;
+@@ -1344,6 +1443,8 @@ var Session = class Session {
+ 	* holds an ordinary published write.
+ 	*/
+ 	firstLiveSeq;
++	/** Last seq supplied by a runtime baseline, absent on a full-log Session. */
++	runtimeBaselineThroughSeq;
+ 	/**
+ 	* Create a detached session by validating and snapshotting borrowed seed
+ 	* events and storage metadata.
+@@ -1367,12 +1468,33 @@ var Session = class Session {
+ 	static fromRestore(id, seed, header) {
+ 		return new Session(id, seed, header, "restore");
+ 	}
+-	constructor(id, seed, header, mode = "snapshot") {
+-		const restoredHeader = mode === "restore" ? validateRestoredSessionHeader(id, header) : void 0;
+-		if (seed !== void 0) for (const [index, source] of seed.entries()) {
++	/**
++	* Restore from one validated runtime baseline plus the canonical suffix that
++	* follows it. The baseline is an acceleration artifact, not history: missing
++	* positions become local ignorable gaps while the canonical seq domain and
++	* current model surface remain unchanged.
++	*/
++	static fromRuntimeBaseline(id, baseline, suffix, header) {
++		return new Session(id, suffix, header, "runtime-baseline", baseline);
++	}
++	constructor(id, seed, header, mode = "snapshot", runtimeBaseline) {
++		const restoredHeader = mode === "restore" || mode === "runtime-baseline" ? validateRestoredSessionHeader(id, header) : void 0;
++		if (mode === "runtime-baseline") {
++			if (runtimeBaseline === void 0) throw new Error("runtime baseline restore requires a baseline");
++			const materialized = materializeSessionRuntimeBaseline(runtimeBaseline, seed ?? []);
++			for (const event of materialized.events) this.log.push(freezeRestoredObject(event));
++			this.surfaceManager = new SurfaceManager(this.log, 0, materialized.surface);
++			this.surfaceManager.nodes;
++			this.runtimeBaselineThroughSeq = runtimeBaseline.throughSeq;
++		} else {
++			this.surfaceManager = new SurfaceManager(this.log);
++			this.runtimeBaselineThroughSeq = void 0;
++		}
++		if (seed !== void 0 && mode !== "runtime-baseline") for (const [index, source] of seed.entries()) {
+ 			const snapshot = mode === "restore" ? source : snapshotJsonValue(source);
+ 			if (snapshot === void 0) throw new Error(`seed event at index ${index} is not losslessly JSON-serializable`);
+ 			assertSessionEventEnvelope(snapshot, index);
++			if (snapshot.type === "session/runtime-gap") throw new Error(`seed event at index ${index} cannot contain a Worker-local runtime gap`);
+ 			assertSupportedRequestHeader(snapshot.type, snapshot.data, `seed event at index ${index}`);
+ 			if (snapshot.seq !== index) throw new Error(`seed event at index ${index} has seq ${snapshot.seq} (expected ${index}); seed must be contiguous from 0`);
+ 			try {
+@@ -1386,6 +1508,16 @@ var Session = class Session {
+ 		this.header = restoredHeader ?? snapshotSessionHeader(id, header);
+ 		if (seed !== void 0 && this.log.at(-1)?.type !== "session/end-seed") this.append("session/end-seed", {});
+ 	}
++	/**
++	* Build a compact runtime projection at the current event cut. Raw stream
++	* chunks and surface nodes shadowed by Compaction are omitted; all other
++	* event-domain state is retained. The result is self-validating and keeps
++	* absolute seqs, so a backend can store it independently of canonical
++	* audit/history segments and later combine it with a short suffix.
++	*/
++	runtimeBaseline() {
++		return createSessionRuntimeBaseline(this.log);
++	}
+ 	/** Cached immutable public snapshot of the private append-only log. */
+ 	eventsSnapshot;
+ 	/**
+@@ -1438,6 +1570,7 @@ var Session = class Session {
+ 	*   rejects before the log changes.
+ 	*/
+ 	append(type, data, ...opts) {
++		if (type === "session/runtime-gap") throw new Error("session/runtime-gap is reserved for runtime-baseline restoration");
+ 		const surfaceOpts = opts[0];
+ 		const surfaceMetadata = {
+ 			...surfaceOpts?.sourceEventSeqs === void 0 ? {} : { sourceEventSeqs: surfaceOpts.sourceEventSeqs },
+@@ -1883,4 +2016,4 @@ var SessionStore = class extends Service {
+ 	}
+ };
+ //#endregion
+-export { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, Session, SessionForkError, SessionId, SessionPreparation, SessionStore, SessionStore as default, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, adoptSessionEvent, canonicalHeader, decodeStorageRecord, deriveEventMessage, foldRequestHeader, foldSurface, headerEquals, interruptedTurnClosers, isAppendSurfaceEvent, isJsonValue, isReplacementSurfaceEvent, isSurfaceEligibleType, isSurfaceEvent, packChunkRuns, snapshotJsonValue, snapshotSessionEvent };
++export { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, Session, SessionForkError, SessionId, SessionPreparation, SessionStore, SessionStore as default, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, adoptSessionEvent, canonicalHeader, createSessionRuntimeBaseline, decodeStorageRecord, deriveEventMessage, foldRequestHeader, foldSurface, headerEquals, interruptedTurnClosers, isAppendSurfaceEvent, isJsonValue, isReplacementSurfaceEvent, isSurfaceEligibleType, isSurfaceEvent, packChunkRuns, snapshotJsonValue, snapshotSessionEvent };
+diff --git a/lib/types/index.d.ts b/lib/types/index.d.ts
+index 1e2f5ba53021445c9b50d993785f3685cc5e885e..d60bd1c740efcaad83b01a5b652c7a0164c6ba8c 100644
+--- a/lib/types/index.d.ts
++++ b/lib/types/index.d.ts
+@@ -10,7 +10,7 @@ import type { Scoped } from '@deepseek-ai/dsh-scope';
+ import type { Message } from '@deepseek-ai/dsh-llm';
+ import { SessionId } from './types.ts';
+ import type { TypertLookup } from '@deepseek-ai/dsh-typert-protocol';
+-import type { CreateSessionOptions, EpochHeader, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SurfaceIntent, SurfaceEventType } from './types.ts';
++import type { CreateSessionOptions, EpochHeader, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SessionRuntimeBaseline, SurfaceIntent, SurfaceEventType } from './types.ts';
+ import type { SessionSurface } from './surface.ts';
+ export * from './types.ts';
+ export { SessionPreparation } from './preparation.ts';
+@@ -21,7 +21,7 @@ export type { JsonValue } from './json.ts';
+ export { interruptedTurnClosers, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from './repair.ts';
+ export { decodeStorageRecord, packChunkRuns } from './chunk-rows.ts';
+ export type { ChunkRow, StorageRecord } from './chunk-rows.ts';
+-export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult } from './surface.ts';
++export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult, SurfaceStateCheckpoint } from './surface.ts';
+ export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts';
+ export { canonicalHeader, foldRequestHeader, headerEquals } from './request-header.ts';
+ export { KNOWN_SESSION_EVENT_TYPES } from './known-event-types.ts';
+@@ -95,6 +95,17 @@ export declare function adoptSessionEvent<T extends SessionEvent>(event: T): T;
+  * @returns a detached event snapshot with a validated, deeply frozen message.
+  */
+ export declare function snapshotSessionEvent<T extends SessionEvent>(event: T): T;
++/**
++ * Project a complete canonical log into the state required to continue its
++ * Agent runtime. The current surface is retained exactly; raw assistant chunks
++ * and surface events shadowed by replacement are left to canonical audit
++ * storage. Tool-call records are retained only when a current tool result
++ * cites them, so a projected log never manufactures an unmatched old call.
++ *
++ * @param events - complete contiguous canonical log at a stable cut.
++ * @returns a detached runtime baseline through the log's final seq.
++ */
++export declare function createSessionRuntimeBaseline(events: readonly SessionEvent[]): SessionRuntimeBaseline;
+ /**
+  * An event-sourced session: an append-only log of {@link SessionEvent}s.
+  *
+@@ -143,6 +154,8 @@ export declare class Session {
+      * holds an ordinary published write.
+      */
+     readonly firstLiveSeq: number;
++    /** Last seq supplied by a runtime baseline, absent on a full-log Session. */
++    readonly runtimeBaselineThroughSeq: number | undefined;
+     /**
+      * Create a detached session by validating and snapshotting borrowed seed
+      * events and storage metadata.
+@@ -162,7 +175,22 @@ export declare class Session {
+      * @returns a restored detached session.
+      */
+     static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader): Session;
++    /**
++     * Restore from one validated runtime baseline plus the canonical suffix that
++     * follows it. The baseline is an acceleration artifact, not history: missing
++     * positions become local ignorable gaps while the canonical seq domain and
++     * current model surface remain unchanged.
++     */
++    static fromRuntimeBaseline(id: SessionId, baseline: SessionRuntimeBaseline, suffix: readonly SessionEvent[], header: SessionHeader): Session;
+     private constructor();
++    /**
++     * Build a compact runtime projection at the current event cut. Raw stream
++     * chunks and surface nodes shadowed by Compaction are omitted; all other
++     * event-domain state is retained. The result is self-validating and keeps
++     * absolute seqs, so a backend can store it independently of canonical
++     * audit/history segments and later combine it with a short suffix.
++     */
++    runtimeBaseline(): SessionRuntimeBaseline;
+     /** Cached immutable public snapshot of the private append-only log. */
+     private eventsSnapshot;
+     /**
+diff --git a/lib/types/index.js b/lib/types/index.js
+index 673a13bbb52af180ddbf36ed2c64109460d327e3..bd91dd81f01a2e7a3107588e2411c2572e720e0c 100644
+--- a/lib/types/index.js
++++ b/lib/types/index.js
+@@ -11,7 +11,7 @@ import { deepFreeze } from '@deepseek-ai/dsh-llm';
+ import { scopeOf, scopeTarget } from '@deepseek-ai/dsh-scope';
+ import { SESSION_FORMAT_VERSION, SessionId } from "./types.js";
+ import { snapshotJsonValue } from "./json.js";
+-import { deriveEventMessage, SurfaceManager } from "./surface.js";
++import { deriveEventMessage, foldSurface, isSurfaceEvent, SurfaceManager } from "./surface.js";
+ import { foldRequestHeader } from "./request-header.js";
+ export * from "./types.js";
+ export { SessionPreparation } from "./preparation.js";
+@@ -270,6 +270,119 @@ function assertMessageEventShape(event, subject) {
+         throw new Error(`${subject} message has mismatched tool call ids`);
+     }
+ }
++/** Runtime-baseline schema version emitted by this build. */
++const SESSION_RUNTIME_BASELINE_VERSION = 1;
++/** Create one small local record for a canonical payload omitted by a baseline. */
++function runtimeGap(seq) {
++    return {
++        type: 'session/runtime-gap',
++        seq,
++        time: 0,
++        data: {},
++        ignorable: true,
++    };
++}
++/**
++ * Project a complete canonical log into the state required to continue its
++ * Agent runtime. The current surface is retained exactly; raw assistant chunks
++ * and surface events shadowed by replacement are left to canonical audit
++ * storage. Tool-call records are retained only when a current tool result
++ * cites them, so a projected log never manufactures an unmatched old call.
++ *
++ * @param events - complete contiguous canonical log at a stable cut.
++ * @returns a detached runtime baseline through the log's final seq.
++ */
++export function createSessionRuntimeBaseline(events) {
++    for (const [index, event] of events.entries()) {
++        if (event.seq !== index) {
++            throw new Error(`runtime baseline source is not contiguous: expected seq ${index}, got ${event.seq}`);
++        }
++    }
++    const surface = foldSurface(events);
++    const surfaceNodes = new Set(surface.nodes);
++    const requiredToolCalls = new Set();
++    for (const seq of surface.nodes) {
++        const event = events[seq];
++        if (event?.type !== 'tool/result')
++            continue;
++        for (const sourceSeq of event.sourceEventSeqs ?? [])
++            requiredToolCalls.add(sourceSeq);
++    }
++    const retained = events.filter((event) => {
++        if (event.type === 'assistant/chunk')
++            return false;
++        if (event.type === 'tool/call')
++            return requiredToolCalls.has(event.seq);
++        if (isSurfaceEvent(event))
++            return surfaceNodes.has(event.seq);
++        return event.type !== 'session/runtime-gap';
++    }).map(event => snapshotSessionEvent(event));
++    return deepFreeze({
++        version: SESSION_RUNTIME_BASELINE_VERSION,
++        throughSeq: events.length - 1,
++        events: retained,
++        surfaceNodes: [...surface.nodes],
++        surfaceReplaceGeneration: surface.replacements.length,
++    });
++}
++/**
++ * Validate and materialize a baseline plus its canonical suffix. Omitted
++ * payloads become local gap records, preserving the absolute seq domain while
++ * avoiding their transfer from durable storage.
++ */
++function materializeSessionRuntimeBaseline(baseline, suffix) {
++    if (baseline.version !== SESSION_RUNTIME_BASELINE_VERSION) {
++        throw new Error(`unsupported session runtime baseline version ${String(baseline.version)}`);
++    }
++    if (!Number.isSafeInteger(baseline.throughSeq) || baseline.throughSeq < -1) {
++        throw new Error('session runtime baseline throughSeq must be a safe integer >= -1');
++    }
++    if (!Number.isSafeInteger(baseline.surfaceReplaceGeneration)
++        || baseline.surfaceReplaceGeneration < 0) {
++        throw new Error('session runtime baseline replace generation must be a non-negative safe integer');
++    }
++    const events = Array.from({ length: baseline.throughSeq + 1 }, (_, seq) => runtimeGap(seq));
++    let priorRetainedSeq = -1;
++    for (const source of baseline.events) {
++        const snapshot = structuredClone(source);
++        assertSessionEventEnvelope(snapshot, source.seq);
++        if (source.seq <= priorRetainedSeq || source.seq > baseline.throughSeq) {
++            throw new Error(`session runtime baseline retained seq ${source.seq} is out of order or out of range`);
++        }
++        priorRetainedSeq = source.seq;
++        events[source.seq] = snapshot;
++    }
++    const seenSurface = new Set();
++    for (const seq of baseline.surfaceNodes) {
++        if (!Number.isSafeInteger(seq) || seq < 0 || seq > baseline.throughSeq
++            || seenSurface.has(seq)) {
++            throw new Error(`session runtime baseline carries invalid surface seq ${String(seq)}`);
++        }
++        seenSurface.add(seq);
++        const event = events[seq];
++        if (event === undefined || !isSurfaceEvent(event)) {
++            throw new Error(`session runtime baseline surface seq ${seq} has no retained surface event`);
++        }
++    }
++    let expected = baseline.throughSeq + 1;
++    for (const source of suffix) {
++        const snapshot = structuredClone(source);
++        assertSessionEventEnvelope(snapshot, expected);
++        if (snapshot.seq !== expected) {
++            throw new Error(`session runtime baseline suffix expected seq ${expected}, got ${String(snapshot.seq)}`);
++        }
++        events.push(snapshot);
++        expected += 1;
++    }
++    return {
++        events,
++        surface: {
++            nodes: [...baseline.surfaceNodes],
++            replaceGeneration: baseline.surfaceReplaceGeneration,
++            throughSeq: baseline.throughSeq,
++        },
++    };
++}
+ /** Whether an unknown value carries the current provider/model pair. */
+ function hasProviderModel(value) {
+     if (typeof value !== 'object' || value === null)
+@@ -320,7 +433,7 @@ const attachments = new WeakMap();
+ export class Session {
+     log = [];
+     /** Single incremental owner of surface acceptance and projection state. */
+-    surfaceManager = new SurfaceManager(this.log);
++    surfaceManager;
+     /** The ordered surface over this session's event log. */
+     get surface() {
+         return this.surfaceManager;
+@@ -361,6 +474,8 @@ export class Session {
+      * holds an ordinary published write.
+      */
+     firstLiveSeq;
++    /** Last seq supplied by a runtime baseline, absent on a full-log Session. */
++    runtimeBaselineThroughSeq;
+     /**
+      * Create a detached session by validating and snapshotting borrowed seed
+      * events and storage metadata.
+@@ -384,11 +499,36 @@ export class Session {
+     static fromRestore(id, seed, header) {
+         return new Session(id, seed, header, 'restore');
+     }
+-    constructor(id, seed, header, mode = 'snapshot') {
+-        const restoredHeader = mode === 'restore'
++    /**
++     * Restore from one validated runtime baseline plus the canonical suffix that
++     * follows it. The baseline is an acceleration artifact, not history: missing
++     * positions become local ignorable gaps while the canonical seq domain and
++     * current model surface remain unchanged.
++     */
++    static fromRuntimeBaseline(id, baseline, suffix, header) {
++        return new Session(id, suffix, header, 'runtime-baseline', baseline);
++    }
++    constructor(id, seed, header, mode = 'snapshot', runtimeBaseline) {
++        const restoredHeader = mode === 'restore' || mode === 'runtime-baseline'
+             ? validateRestoredSessionHeader(id, header)
+             : undefined;
+-        if (seed !== undefined) {
++        if (mode === 'runtime-baseline') {
++            if (runtimeBaseline === undefined)
++                throw new Error('runtime baseline restore requires a baseline');
++            const materialized = materializeSessionRuntimeBaseline(runtimeBaseline, seed ?? []);
++            for (const event of materialized.events)
++                this.log.push(freezeRestoredObject(event));
++            this.surfaceManager = new SurfaceManager(this.log, 0, materialized.surface);
++            // Force validation of every suffix surface transition at the restore
++            // boundary rather than deferring a corrupt checkpoint to first use.
++            void this.surfaceManager.nodes;
++            this.runtimeBaselineThroughSeq = runtimeBaseline.throughSeq;
++        }
++        else {
++            this.surfaceManager = new SurfaceManager(this.log);
++            this.runtimeBaselineThroughSeq = undefined;
++        }
++        if (seed !== undefined && mode !== 'runtime-baseline') {
+             // Validate the seed to the SAME invariants `append` enforces, so a
+             // replay/fork (`ctx.sessions.create(id, { seed })`) cannot construct a
+             // live log that no persistence backend could store: each event's `data`
+@@ -430,6 +570,16 @@ export class Session {
+             this.append('session/end-seed', {});
+         }
+     }
++    /**
++     * Build a compact runtime projection at the current event cut. Raw stream
++     * chunks and surface nodes shadowed by Compaction are omitted; all other
++     * event-domain state is retained. The result is self-validating and keeps
++     * absolute seqs, so a backend can store it independently of canonical
++     * audit/history segments and later combine it with a short suffix.
++     */
++    runtimeBaseline() {
++        return createSessionRuntimeBaseline(this.log);
++    }
+     /** Cached immutable public snapshot of the private append-only log. */
+     eventsSnapshot;
+     /**
+diff --git a/lib/types/known-event-types.js b/lib/types/known-event-types.js
+index 7541caa4177d353f3d57fda538942dcb57821e35..875bcc692435dd41c4ad733abff7e9bc624e26c3 100644
+--- a/lib/types/known-event-types.js
++++ b/lib/types/known-event-types.js
+@@ -42,6 +42,7 @@ export const KNOWN_SESSION_EVENT_TYPES = new Set([
+     'sandbox/mode',
+     'schedule/change',
+     'session/end-seed',
++    'session/runtime-gap',
+     'session/title',
+     'session/title-llm-request',
+     'step/end',
+diff --git a/lib/types/surface.d.ts b/lib/types/surface.d.ts
+index d0db42f87d3d5f027eeebb3fd3f18815e849f6b5..cc4995e1d0788fb8bd8d5cb815407aaa8e9c911a 100644
+--- a/lib/types/surface.d.ts
++++ b/lib/types/surface.d.ts
+@@ -86,6 +86,15 @@ export interface SessionSurface {
+     /** Monotonic count of committed positional replacements. */
+     readonly replaceGeneration: number;
+ }
++/** Durable projection of the incremental surface fold at one event cut. */
++export interface SurfaceStateCheckpoint {
++    /** Current surface nodes in model-visible order. */
++    readonly nodes: readonly number[];
++    /** Number of positional replacements applied through the cut. */
++    readonly replaceGeneration: number;
++    /** Last absolute event seq already reflected by the checkpoint. */
++    readonly throughSeq: number;
++}
+ /**
+  * Replay a complete session log through the canonical surface fold.
+  * @param events - session events in contiguous seq order.
+@@ -107,7 +116,7 @@ export declare class SurfaceManager implements SessionSurface {
+      * @param log - Contiguous complete log or loaded event window.
+      * @param baseSeq - Absolute sequence of the window's first event.
+      */
+-    constructor(log: readonly SessionEvent[], baseSeq?: number);
++    constructor(log: readonly SessionEvent[], baseSeq?: number, checkpoint?: SurfaceStateCheckpoint);
+     /**
+      * Validate the next candidate without mutating the committed surface.
+      * @param event - candidate event that has not entered the log yet.
+diff --git a/lib/types/surface.js b/lib/types/surface.js
+index c4b05f46a27a1dfd67cba6fc8d5ebcd7c532dfce..59bf7cea0e0642bf4f1db13a62c0793584620188 100644
+--- a/lib/types/surface.js
++++ b/lib/types/surface.js
+@@ -323,10 +323,18 @@ export class SurfaceManager {
+      * @param log - Contiguous complete log or loaded event window.
+      * @param baseSeq - Absolute sequence of the window's first event.
+      */
+-    constructor(log, baseSeq = 0) {
++    constructor(log, baseSeq = 0, checkpoint) {
+         this.log = log;
+         this.baseSeq = baseSeq;
+-        this._lastProcessedSeq = baseSeq - 1;
++        if (checkpoint === undefined) {
++            this._lastProcessedSeq = baseSeq - 1;
++            return;
++        }
++        this._state = {
++            nodes: [...checkpoint.nodes],
++            replaceGeneration: checkpoint.replaceGeneration,
++        };
++        this._lastProcessedSeq = checkpoint.throughSeq;
+     }
+     /**
+      * Validate the next candidate without mutating the committed surface.
+diff --git a/lib/types/types.d.ts b/lib/types/types.d.ts
+index b1e6a94f44596f305a5fd365974e4af08fbc0ad9..8305bb5c3137de9905c6e66fb13eed6f918f6000 100644
+--- a/lib/types/types.d.ts
++++ b/lib/types/types.d.ts
+@@ -76,6 +76,29 @@ export interface SessionHeader {
+      */
+     readonly agentPreset?: string;
+ }
++/**
++ * Versioned, backend-neutral checkpoint used to resume a Session without
++ * transferring event payloads that no longer affect the live runtime.
++ *
++ * The canonical append-only log remains the audit/history authority. A
++ * checkpoint is only a projection of that log through `throughSeq`: omitted
++ * positions are materialized as ignorable gap records inside the Worker so
++ * absolute sequence numbers, future append cursors, and source references do
++ * not change. `surfaceNodes` is the exact model-visible surface at the cut;
++ * every referenced event must be present in `events`.
++ */
++export interface SessionRuntimeBaseline {
++    /** Baseline wire/schema version. */
++    readonly version: 1;
++    /** Last canonical event sequence represented by this checkpoint. */
++    readonly throughSeq: number;
++    /** Retained canonical events at or below `throughSeq`, in seq order. */
++    readonly events: readonly SessionEvent[];
++    /** Current model-visible surface event sequences, in model order. */
++    readonly surfaceNodes: readonly number[];
++    /** Surface replacement generation at the checkpoint cut. */
++    readonly surfaceReplaceGeneration: number;
++}
+ /**
+  * Options for creating a {@link Session} via the store. `seed` replays/forks
+  * an existing event log; `meta` carries the caller-supplied storage fields the
+@@ -351,6 +374,12 @@ export interface SessionEventMap {
+      * so tolerating concurrent writers needs a signal beyond the log.
+      */
+     'session/end-seed': Record<string, never>;
++    /**
++     * Worker-local placeholder for a canonical event intentionally omitted from
++     * a runtime baseline. It is never written by a normal live Session and never
++     * replaces the canonical event in durable audit/history storage.
++     */
++    'session/runtime-gap': Record<string, never>;
+ }
+ /** The appendable event-type keys of {@link SessionEventMap}, plugin-merged extensions included. */
+ export type SessionEventType = keyof SessionEventMap;
