@@ -56,7 +56,7 @@ mode and creates no local execution fallback.
 
 | Setting | Purpose |
 | --- | --- |
-| `DSH_CLOUD_CUBE_API_URL` / `DSH_CLOUD_CUBE_API_KEY` | Trusted Cube control endpoint and credential, held only by Tool Broker. |
+| `DSH_CLOUD_CUBE_API_URL` / `DSH_CLOUD_CUBE_API_KEY` | DSH-owned Cube API frontend and credential, held only by Tool Broker. They must not point to or reuse Pi Cloud's authorizer. |
 | `DSH_CLOUD_CUBE_TEMPLATE_ID` | Registered credential-free execution image. |
 | `DSH_CLOUD_CUBE_VOLUME_DRIVER` | Persistent Workspace Volume driver; default `dsh-cloud-posix`. |
 | `DSH_CLOUD_CUBE_PROXY_NODE_IP`, `DSH_CLOUD_CUBE_PROXY_PORT`, `DSH_CLOUD_CUBE_PROXY_SCHEME`, `DSH_CLOUD_CUBE_DOMAIN` | Private ingress route from Tool Broker to the execution agent. |
@@ -81,3 +81,7 @@ are image internals, not tenant-controlled settings.
   Workspace durability.
 - Secrets must be supplied by deployment Secret/file mechanisms and must not
   enter Worker logs, Session events, Workspace files, or Cube environment.
+- Tool Broker startup probes the Cube callback policy: `dsh-*` Volume item
+  paths must be admitted and `adw-*` paths must be denied. This makes an
+  accidentally shared Pi Cloud credential a startup error rather than a
+  delayed 401 during the first coding Turn.

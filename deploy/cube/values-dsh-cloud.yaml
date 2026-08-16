@@ -1,0 +1,8 @@
+# Merge into the CubeSandbox v0.6.0 values for the DSH-owned Cube API/control
+# plane. Do not merge this into Pi Cloud's Cube release: each product keeps a
+# distinct API credential and callback policy.
+controlPlane:
+  api:
+    env:
+      - name: AUTH_CALLBACK_URL
+        value: http://dsh-cloud-cube-api-authorizer.cube-system.svc.cluster.local:8080/verify

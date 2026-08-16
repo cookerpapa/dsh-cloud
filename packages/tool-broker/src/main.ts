@@ -24,6 +24,7 @@ const provider = new CubeSandboxProvider({
   egressProxyIp: await secret('DSH_CLOUD_CUBE_EGRESS_PROXY_IP'),
   volumeDriver: process.env['DSH_CLOUD_CUBE_VOLUME_DRIVER'] ?? 'dsh-cloud-posix',
 })
+await provider.verifyAuthorizationBoundary()
 const broker = new ToolBroker({
   pool,
   namespace,

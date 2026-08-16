@@ -113,6 +113,14 @@ DSH tool consumer
   -> CubeSandbox KVM
 ```
 
+DSH Cloud owns a separate CubeAPI callback policy and API key. The callback
+admits the Broker's bounded sandbox inventory/lifecycle operations and
+`dsh-<48 hex>` Workspace Volumes, while rejecting Pi Cloud's `adw-*` Volume
+namespace. A dedicated Cube control/compute installation is the recommended
+security boundary; trusted infrastructure may share lower-level capacity only
+through a distinct DSH CubeAPI frontend. DSH Cloud never imports or extends Pi
+Cloud's authorizer.
+
 The model cannot select a sandbox id, namespace, runtime class, mount, or network policy. Those values are derived from trusted Run authority.
 
 The execution agent listens only behind Cube private ingress. Its initial bind

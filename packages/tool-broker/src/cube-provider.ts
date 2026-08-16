@@ -62,6 +62,25 @@ class CubeSandboxProvider implements SandboxProvider {
     })
   }
 
+  /**
+   * Fail closed when this trusted Broker is accidentally pointed at another
+   * product's Cube credential or path policy. Cube maps every callback denial
+   * to HTTP 401, while an authorized nonexistent resource returns 404.
+   */
+  async verifyAuthorizationBoundary(): Promise<void> {
+    const own = await this.controlRaw(`/volumes/dsh-${'0'.repeat(48)}`)
+    await own.body?.cancel().catch(() => undefined)
+    if (own.status !== 200 && own.status !== 404) {
+      throw new Error(`Cube authorization does not admit DSH Cloud Volume identities (HTTP ${own.status})`)
+    }
+
+    const foreign = await this.controlRaw(`/volumes/adw-${'0'.repeat(48)}`)
+    await foreign.body?.cancel().catch(() => undefined)
+    if (foreign.status !== 401) {
+      throw new Error('Cube credential is not isolated to the DSH Cloud API policy')
+    }
+  }
+
   async create(input: Readonly<{ activationId: string; tenantId: string; workspaceId: string; writerFence: number }>): Promise<SandboxHandle> {
     const volumeId = this.volumeId(input.tenantId, input.workspaceId)
     await this.ensureVolume(volumeId)
@@ -201,7 +220,16 @@ class CubeSandboxProvider implements SandboxProvider {
   }
 
   private async control(path: string, init: { method?: 'GET' | 'POST' | 'DELETE'; body?: string } = {}, allowNotFound = false): Promise<Awaited<ReturnType<typeof fetch>>> {
-    const response = await fetch(`${this.apiUrl}${path}`, {
+    const response = await this.controlRaw(path, init)
+    if (!response.ok && !(allowNotFound && response.status === 404)) {
+      await response.body?.cancel().catch(() => undefined)
+      throw new Error(`Cube API request failed with HTTP ${response.status}`)
+    }
+    return response
+  }
+
+  private controlRaw(path: string, init: { method?: 'GET' | 'POST' | 'DELETE'; body?: string } = {}): Promise<Awaited<ReturnType<typeof fetch>>> {
+    return fetch(`${this.apiUrl}${path}`, {
       method: init.method ?? 'GET',
       headers: {
         authorization: `Bearer ${this.options.apiKey}`,
@@ -210,11 +238,6 @@ class CubeSandboxProvider implements SandboxProvider {
       ...(init.body === undefined ? {} : { body: init.body }),
       signal: AbortSignal.timeout(60_000),
     })
-    if (!response.ok && !(allowNotFound && response.status === 404)) {
-      await response.body?.cancel().catch(() => undefined)
-      throw new Error(`Cube API request failed with HTTP ${response.status}`)
-    }
-    return response
   }
 
   private async data(handle: SandboxHandle, path: string, init: {

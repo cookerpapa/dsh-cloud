@@ -33,8 +33,8 @@ table or PostgreSQL event Outbox in this path.
 ## Automated verification
 
 - all TypeScript project references build with unused local/parameter checks;
-- 52 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
-  and Valkey services;
+- 79 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
+  and Valkey services, alongside 31 default unit and protocol-contract checks;
 - the tests cover native Session reconstruction, fixed-window group commit,
   segment digest verification, stale fences, ambiguous prompt dispatch,
   cross-tenant access, Run claims, cancellation, concurrent activation,
@@ -137,6 +137,35 @@ multiple logical activation rows. This is not reported as successful six-way
 Tool concurrency. It establishes that Worker/model concurrency is healthy,
 while this laptop's current Cube compute plane must be expanded or repaired
 before advertising concurrent KVM coding capacity.
+
+## Independent Cube API authorization
+
+DSH Cloud was given its own CubeAPI frontend, callback authorizer and randomly
+rotated API credential. Pi Cloud's API and authorizer were not modified. The
+local acceptance shares only the lower CubeMaster/compute capacity; a dedicated
+DSH Cube control/compute installation remains the recommended production
+boundary.
+
+The live policy matrix returned:
+
+| Principal and endpoint | Probe | Result |
+| --- | --- | ---: |
+| DSH credential -> DSH CubeAPI | nonexistent `dsh-*` Volume | HTTP 404 (authorized) |
+| DSH credential -> Pi CubeAPI | `dsh-*` Volume | HTTP 401 |
+| Pi credential -> DSH CubeAPI | `adw-*` Volume | HTTP 401 |
+
+A real DSH Volume completed create/read/delete/not-found with HTTP
+201/200/204/404. After that lifecycle test, a new external user created a
+Workspace and Session and asked the Agent to implement insertion sort inside
+Cube. The Run completed in 98.8 seconds after 1,085 browser-observed native
+events and actually passed seven Python tests.
+
+The DSH credential was then rotated, the authorizer and Tool Broker were
+restarted, and startup policy preflight passed. A second Turn recovered the
+same Workspace, reran the retained insertion-sort tests, added binary search
+and completed 15 tests in total. It settled in 93.4 seconds after 1,638 new
+browser-observed events. Neither Turn encountered the former shared-authorizer
+401 failure.
 
 ## Tiered Session persistence
 

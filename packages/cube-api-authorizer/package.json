@@ -1,0 +1,25 @@
+{
+  "name": "@dsh-cloud/cube-api-authorizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/main.js",
+  "types": "lib/main.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/authorization.d.ts",
+      "default": "./lib/authorization.js"
+    },
+    "./server": {
+      "types": "./lib/server.d.ts",
+      "default": "./lib/server.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
+  }
+}

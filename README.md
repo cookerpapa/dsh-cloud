@@ -102,8 +102,10 @@ recorded in the [production acceptance report](docs/reports/production-acceptanc
 
 ## One-host deployment
 
-The one-host profile requires Docker Compose plus an existing CubeSandbox
-control/compute cluster and a Cube Volume driver. Set
+The one-host profile requires Docker Compose plus a DSH-owned CubeSandbox API
+security domain and Cube Volume driver. It must use the DSH authorizer and an
+API credential distinct from Pi Cloud or any other product; the checked-in
+[Cube deployment guide](deploy/cube/README.md) describes that boundary. Set
 `DSH_CLOUD_CUBE_CONTROL_NETWORK` to the external Docker network that exposes
 the trusted Cube API relay named by `DSH_CLOUD_CUBE_API_URL`; the Tool Broker joins
 that network, while Workers and the Gateway do not. Build and publish the
@@ -116,7 +118,7 @@ credential-free execution image, register it as described below, then run:
 ```
 
 The first invocation creates a mode-0600 environment file and generates the
-platform-owned secrets. The second validates the configuration, builds the
+platform-owned secrets, including the DSH Cube API key. The second validates the configuration, builds the
 Gateway/Worker/Tool-Broker images, starts PostgreSQL, Kafka, Valkey and two Workers, and waits for
 the health gates. `./install.sh check` renders Compose without changing the
 deployment; `./install.sh down` stops services while retaining PostgreSQL and
@@ -158,6 +160,10 @@ installation. When autoscaling is enabled, install KEDA first. The chart adds
 PodDisruptionBudgets, non-root/read-only security contexts, default-deny
 NetworkPolicies, Worker drain grace, health probes and Prometheus scrape
 annotations.
+
+The Cube Secret must contain the same dedicated DSH credential installed in
+`dsh-cloud-cube-api-credential`. Tool Broker startup rejects a Pi Cloud policy
+or a credential that can access both `dsh-*` and `adw-*` Volume identities.
 
 KEDA runs in its own namespace, so the PostgreSQL URL stored in the Secret must
 use a fully qualified in-cluster service name (for example,

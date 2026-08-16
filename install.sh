@@ -21,8 +21,9 @@ if [[ ! -f "${environment_file}" ]]; then
     -e "s|^POSTGRES_PASSWORD=$|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" \
     -e "s|^DSH_CLOUD_TOOL_BROKER_TOKEN=$|DSH_CLOUD_TOOL_BROKER_TOKEN=$(openssl rand -hex 32)|" \
     -e "s|^DSH_CLOUD_SANDBOX_ENCRYPTION_KEY=$|DSH_CLOUD_SANDBOX_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')|" \
+    -e "s|^DSH_CLOUD_CUBE_API_KEY=$|DSH_CLOUD_CUBE_API_KEY=$(openssl rand -hex 32)|" \
     "${environment_file}"
-  log "created ${environment_file}; add the DeepSeek and Cube values, then rerun"
+  log "created ${environment_file}; add the DeepSeek and dedicated DSH Cube endpoint/template values, install the matching Cube authorizer, then rerun"
   exit 2
 fi
 

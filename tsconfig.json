@@ -8,6 +8,7 @@
     { "path": "./packages/run-queue" },
     { "path": "./packages/execution-protocol" },
     { "path": "./packages/execution-agent" },
+    { "path": "./packages/cube-api-authorizer" },
     { "path": "./packages/execution-client" },
     { "path": "./packages/fs-remote" },
     { "path": "./packages/subprocess-remote" },

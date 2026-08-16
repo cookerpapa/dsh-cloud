@@ -181,6 +181,58 @@ async function setup(): Promise<{
 }
 
 describe('Cube provider contract', () => {
+  it('accepts only a DSH-scoped Cube API credential', async () => {
+    const serverPort = await port()
+    const server = createHttpServer((request, response) => {
+      if (request.url?.startsWith('/volumes/dsh-') === true) response.writeHead(404).end()
+      else response.writeHead(401).end()
+    })
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', resolve) })
+    try {
+      const provider = new CubeSandboxProvider({
+        namespace: 'test',
+        apiUrl: `http://127.0.0.1:${serverPort}`,
+        apiKey: 'dsh-cube-key',
+        templateId: 'template',
+        proxyNodeIp: '127.0.0.1',
+        proxyPort: serverPort,
+        proxyScheme: 'http',
+        sandboxDomain: 'cube.test',
+        egressProxyIp: '192.0.2.1',
+      })
+      await expect(provider.verifyAuthorizationBoundary()).resolves.toBeUndefined()
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+    }
+  })
+
+  it('rejects the shared Pi Cloud Cube API policy before serving Tool traffic', async () => {
+    const serverPort = await port()
+    const server = createHttpServer((request, response) => {
+      if (request.url?.startsWith('/volumes/adw-') === true) response.writeHead(404).end()
+      else response.writeHead(401).end()
+    })
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', resolve) })
+    try {
+      const provider = new CubeSandboxProvider({
+        namespace: 'test',
+        apiUrl: `http://127.0.0.1:${serverPort}`,
+        apiKey: 'pi-cube-key',
+        templateId: 'template',
+        proxyNodeIp: '127.0.0.1',
+        proxyPort: serverPort,
+        proxyScheme: 'http',
+        sandboxDomain: 'cube.test',
+        egressProxyIp: '192.0.2.1',
+      })
+      await expect(provider.verifyAuthorizationBoundary()).rejects.toThrow(
+        'Cube authorization does not admit DSH Cloud Volume identities',
+      )
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+    }
+  })
+
   it('uses Cube official API-key authentication for Volume lifecycle calls', async () => {
     const serverPort = await port()
     const requests: Array<{ method: string | undefined; headers: Record<string, string | string[] | undefined> }> = []

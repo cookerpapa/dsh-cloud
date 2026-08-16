@@ -23,6 +23,10 @@ FROM build AS tool-broker-package
 RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
  pnpm --filter @dsh-cloud/tool-broker deploy --prod --legacy /out/tool-broker
 
+FROM build AS cube-api-authorizer-package
+RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
+ pnpm --filter @dsh-cloud/cube-api-authorizer deploy --prod --legacy /out/cube-api-authorizer
+
 FROM node:24-bookworm-slim AS worker
 ENV NODE_ENV=production
 WORKDIR /app
@@ -35,6 +39,14 @@ USER node
 EXPOSE 3080
 EXPOSE 9090
 ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["node","lib/main.js"]
+
+FROM node:24-bookworm-slim AS cube-api-authorizer
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=cube-api-authorizer-package --chown=node:node /out/cube-api-authorizer/ /app/
+USER node
+EXPOSE 8080
 CMD ["node","lib/main.js"]
 
 FROM node:24-bookworm-slim AS gateway
