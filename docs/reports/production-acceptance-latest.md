@@ -33,7 +33,7 @@ table or PostgreSQL event Outbox in this path.
 ## Automated verification
 
 - all TypeScript project references build with unused local/parameter checks;
-- 49 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
+- 50 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
   and Valkey services;
 - the tests cover native Session reconstruction, fixed-window group commit,
   segment digest verification, stale fences, ambiguous prompt dispatch,
@@ -42,6 +42,9 @@ table or PostgreSQL event Outbox in this path.
   rebuild, WebSocket text framing and failure injection;
 - a fresh two-Worker boot validates concurrent schema initialization; the
   migration path serializes initialization with a PostgreSQL advisory lock;
+- eight concurrent cold user placements verify that first-time affinity is
+  serialized and balanced instead of herding a registration burst onto the
+  same Worker;
 - Helm lint/render, production Compose rendering, shell syntax and whitespace
   checks pass.
 
@@ -71,6 +74,37 @@ An additional two-Turn coding acceptance during the same migration exercised
 warm Cube reuse. The first Turn created and tested insertion sort; the second
 Turn read the retained file, added a deterministic 100-element test and ran it
 again. Both completed against the real model and the same Workspace activation.
+
+The final source was then rebuilt into a second isolated deployment and tested
+as six new users starting at the same time. Every user registered through the
+public API, created a new Workspace and Session, opened the authenticated event
+stream, and consumed a real DeepSeek response.
+
+| Concurrent Agent measure | Result |
+| --- | ---: |
+| new users / Workspaces / Sessions | 6 / 6 / 6 |
+| terminal results | 6 completed, 0 failed |
+| Worker placement | 3 on Worker 1, 3 on Worker 2 |
+| client duration | 14.2-17.8 s |
+| mean client duration | 15.5 s |
+| fine native events observed by clients | 2,728 |
+| durable Kafka records | 44 |
+| fine-event to durable-record ratio | 62:1 |
+
+A subsequent Turn reused one of those Sessions and correctly referred to the
+previous answer. A third Turn in that same Session reused its Workspace and
+Cube, created `algorithms.py`, implemented stable merge sort and binary search,
+and actually ran `python3 algorithms.py`; all 20 assertions passed. The final
+coding Turn completed in 101.8 seconds after 4,642 observable native events.
+
+The initial six-way *coding* load also exposed the boundary of this particular
+single-node Cube installation: four tasks completed, while two model-driven
+Tool sequences repeatedly encountered Cube HTTP 502 and were cancelled after
+the acceptance timeout. Inspection showed one physical Cube shim despite
+multiple logical activation rows. This is not reported as successful six-way
+Tool concurrency. It establishes that Worker/model concurrency is healthy,
+while this laptop's current Cube compute plane must be expanded or repaired
+before advertising concurrent KVM coding capacity.
 
 ## Tiered Session persistence
 
@@ -109,6 +143,33 @@ projection. At a completed Turn boundary, model-context recovery reads the
 compressed PostgreSQL native segment; it does not reconstruct a synthetic
 `messages[]` array.
 
+## Throughput measurements
+
+The concurrent six-user run exercised the application path, including real
+model streams and the browser durability gate. The 40 ms group-commit window
+reduced 2,728 client-visible native events to 44 `acks=all` Kafka records. All
+six streams remained incremental and completed; grouping did not turn them
+into end-of-Turn responses.
+
+Raw component headroom was measured separately so model and Cube latency did
+not distort the storage result. The benchmark used explicit temporary targets,
+which were deleted after the run and never shared tables or topics with product
+data.
+
+| Component benchmark | Result |
+| --- | --- |
+| Kafka | 100,000 x 1 KiB records; `acks=all`, idempotent producer, gzip, 12 partitions |
+| Kafka throughput | 30,543.7 records/s; 29.83 MiB/s |
+| Kafka producer latency | 6.76 ms average; 11 ms p95; 13 ms p99; 0 errors |
+| PostgreSQL | pgbench scale 10; 16 clients; 8 threads; 30 s read/write TPC-B-like workload |
+| PostgreSQL throughput | 1,163.6 transactions/s; 34,849 transactions; 0 failures |
+| PostgreSQL latency | 13.74 ms average |
+
+These numbers measure one local Kafka broker and one local PostgreSQL instance,
+not end-to-end Agent capacity. End-to-end coding concurrency is currently
+bounded first by the single-node Cube compute plane and then by model latency;
+the messaging and relational stores had substantial headroom in this test.
+
 ## Accepted limits
 
 - The one-host Compose profile has one Kafka broker and is not highly
@@ -119,6 +180,9 @@ compressed PostgreSQL native segment; it does not reconstruct a synthetic
   or Valkey.
 - Cube control/compute capacity, PostgreSQL availability and persistent Volume
   durability remain deployment responsibilities.
+- The measured local Cube installation did not sustain six concurrent coding
+  sandboxes. The report therefore makes no multi-KVM capacity claim even though
+  six concurrent non-Tool Agent Runs completed successfully.
 - Arbitrary shell execution is not advertised as exactly once. Once prompt
   dispatch may have started, a Run is not blindly replayed after an ambiguous
   transport failure.

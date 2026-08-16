@@ -76,6 +76,20 @@ enabled('PostgreSQL control authority', () => {
     expect((await store.routeWorker(first!.userId))?.id).toBe(firstWorker?.id)
   })
 
+  test('does not herd concurrently registered users onto one Worker', async () => {
+    const users = await Promise.all(Array.from({ length: 8 }, async (_, index) =>
+      store.register(`Concurrent ${index}`, `concurrent-${index}-${randomUUID()}@example.test`, 'correct horse battery staple')))
+    const placements = await Promise.all(users.map(user => store.routeWorker(user.userId)))
+    const counts = new Map<string, number>()
+    for (const placement of placements) {
+      expect(placement?.id).toBeDefined()
+      counts.set(placement!.id, (counts.get(placement!.id) ?? 0) + 1)
+    }
+    expect([...counts.keys()].sort()).toEqual(['worker-a', 'worker-b'])
+    const values = [...counts.values()]
+    expect(Math.max(...values) - Math.min(...values)).toBeLessThanOrEqual(1)
+  })
+
   test('admission is idempotent and tenant scoped', async () => {
     const sessionId = randomUUID()
     await store.registerSession({ sessionId, tenantId, workspaceId })

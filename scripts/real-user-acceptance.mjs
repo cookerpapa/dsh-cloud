@@ -5,7 +5,11 @@ import WebSocket from 'ws'
 const baseUrl = new URL(process.env.DSH_CLOUD_ACCEPTANCE_URL || 'http://127.0.0.1:18080')
 const statePath = process.env.DSH_CLOUD_ACCEPTANCE_STATE || '/tmp/dsh-cloud-real-user.json'
 const prompt = process.env.DSH_CLOUD_ACCEPTANCE_PROMPT
+const timeoutMs = Number(process.env.DSH_CLOUD_ACCEPTANCE_TIMEOUT_MS ?? '300000')
 if (!prompt) throw new Error('DSH_CLOUD_ACCEPTANCE_PROMPT is required')
+if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 10_000 || timeoutMs > 1_800_000) {
+  throw new Error('DSH_CLOUD_ACCEPTANCE_TIMEOUT_MS must be an integer from 10000 to 1800000')
+}
 
 async function request(path, init = {}) {
   const response = await fetch(new URL(path, baseUrl), init)
@@ -76,8 +80,8 @@ const terminalPromise = new Promise((resolve, reject) => {
 })
 const timeout = setTimeout(() => {
   const tail = observed.slice(-8).map(event => `${event.seq}:${event.type}`).join(',')
-  rejectTerminal(new Error(`real-user turn did not settle within 180 seconds (events=${observed.length}, promptSeq=${promptSeq}, tail=${tail})`))
-}, 180_000)
+  rejectTerminal(new Error(`real-user turn did not settle within ${timeoutMs}ms (events=${observed.length}, promptSeq=${promptSeq}, tail=${tail})`))
+}, timeoutMs)
 socket.on('message', data => {
   let message
   try { message = JSON.parse(data.toString()) } catch { return }

@@ -414,17 +414,36 @@ export class ControlStore {
       const user = await client.query<{ preferred_worker_id: string | null }>(`
         SELECT preferred_worker_id FROM ${SQL_SCHEMA}.users WHERE namespace=$1 AND id=$2 FOR UPDATE
       `, [this.namespace, userId])
+      const preferredWorkerId = user.rows[0]?.preferred_worker_id
       if (user.rows[0] === undefined) { await client.query('COMMIT'); return undefined }
+      if (preferredWorkerId !== null) {
+        const preferred = await client.query<WorkerRow>(`
+          SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
+          WHERE namespace=$1 AND id=$2 AND NOT draining
+            AND heartbeat_at>now()-interval '15 seconds'
+        `, [this.namespace, preferredWorkerId])
+        const existing = preferred.rows[0]
+        if (existing !== undefined) {
+          await client.query('COMMIT')
+          return worker(existing)
+        }
+      }
+      // First placement changes durable affinity. Serialize only this cold path
+      // so a burst of registrations cannot all observe the same least-loaded
+      // Worker before any of their assignments commit. Established users never
+      // take this global placement lock.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+        `${this.namespace}:worker-placement`,
+      ])
       const selected = await client.query<WorkerRow>(`
         SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
         WHERE namespace=$1 AND NOT draining AND heartbeat_at>now()-interval '15 seconds'
-        ORDER BY CASE WHEN id=$2 THEN 0 ELSE 1 END,
-          active_runs::float/maximum_runs,
-          (SELECT count(*) FROM ${SQL_SCHEMA}.users assigned
+        ORDER BY (SELECT count(*) FROM ${SQL_SCHEMA}.users assigned
             WHERE assigned.namespace=${SQL_SCHEMA}.workers.namespace AND assigned.preferred_worker_id=${SQL_SCHEMA}.workers.id),
+          active_runs::float/maximum_runs,
           id
         LIMIT 1
-      `, [this.namespace, user.rows[0].preferred_worker_id ?? ''])
+      `, [this.namespace])
       const row = selected.rows[0]
       if (row !== undefined) await client.query(`UPDATE ${SQL_SCHEMA}.users SET preferred_worker_id=$3 WHERE namespace=$1 AND id=$2`, [this.namespace, userId, row.id])
       await client.query('COMMIT')
