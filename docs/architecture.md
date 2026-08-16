@@ -174,6 +174,16 @@ than one permanent row per token chunk. An interrupted Turn is recovered from
 the sealed PostgreSQL prefix plus exact live-log locations; Valkey can be rebuilt.
 There is no S3/MinIO dependency and no separately reconstructed `messages[]`.
 
+After a successful native DSH Compaction, the transaction also replaces one
+verified gzip restore checkpoint covering the exact append-only log through the
+Compaction boundary. A cold Worker reads that checkpoint and seeks only the
+later physical suffix. This avoids revisiting every older Turn segment while
+preserving byte-equivalent DSH events, request headers, Tool outcomes,
+Compaction provenance and plugin state. The canonical segments remain retained
+for history and as the fail-soft source if derived checkpoint validation fails.
+This is a physical restore accelerator, not logical event truncation: released
+DSH `0.1.0-rc.6` still requires a contiguous native log for Agent resume.
+
 The live log and projection are Cordis Service Definitions. The tiered
 SessionPersistence imports neither Kafka nor Valkey clients; deployments can
 replace either Provider while retaining the official DSH storage contract.

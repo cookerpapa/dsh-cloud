@@ -77,6 +77,59 @@ function completedTurn(startSeq = 0, turn = 1): SessionEvent[] {
   ]
 }
 
+function compaction(
+  startSeq: number,
+  shadowedSeqs: number[],
+  summary: string,
+  ordinal = 1,
+): SessionEvent[] {
+  const first = shadowedSeqs[0]
+  const last = shadowedSeqs.at(-1)
+  if (first === undefined || last === undefined) throw new Error('compaction needs a surface range')
+  const compactionId = `compaction-${ordinal}`
+  return [
+    {
+      type: 'compaction/start',
+      seq: startSeq,
+      time: startSeq + 1,
+      data: { compactionId, turn: null },
+    },
+    {
+      type: 'compaction/summary',
+      seq: startSeq + 1,
+      time: startSeq + 2,
+      data: {
+        compactionId,
+        summary: [{ type: 'text', text: summary }],
+        shadowedRange: { start: first, end: last },
+        shadowedSeqs,
+        shadowedTokenCount: 100,
+        provider: 'test',
+        model: 'test',
+      },
+    },
+    {
+      type: 'user/message',
+      seq: startSeq + 2,
+      time: startSeq + 3,
+      data: createMessage({
+        id: MessageId(`compact-checkpoint-${ordinal}`),
+        role: 'user',
+        content: [{ type: 'text', text: `<summary>${summary}</summary>` }],
+        source: { kind: 'plugin', plugin: 'compact', compactionId },
+      }),
+      surfaceOp: { op: 'replace', start: first, end: last },
+      sourceEventSeqs: [startSeq, startSeq + 1, ...shadowedSeqs],
+    },
+    {
+      type: 'compaction/end',
+      seq: startSeq + 3,
+      time: startSeq + 4,
+      data: { compactionId, turn: null },
+    },
+  ] as SessionEvent[]
+}
+
 function authority(sessionId: string, fence: number, attempt = `attempt-${fence}`): RunAuthority {
   return {
     tenantId: cloudIdentifier('TenantId', 'tenant-a'),
@@ -326,5 +379,126 @@ integration('TieredSessionPersistence', () => {
     } finally {
       await pool.end()
     }
+  })
+
+  it('restores the exact native Session from a compaction checkpoint plus suffix on a new Worker', async () => {
+    const namespace = `test-${randomUUID()}`
+    const first = await backend(namespace)
+    const meta = header('checkpoint-suffix')
+    const compacted = [...completedTurn(), ...compaction(6, [1, 3], 'turn one summary')]
+    const suffix = completedTurn(10, 2)
+    await first.ctx.sessionPersistence.create(meta)
+    await first.ctx.cloudRunContext.run(authority(meta.id, 1), () =>
+      first.ctx.sessionPersistence.append(meta.id, compacted))
+    await first.ctx.cloudRunContext.run(authority(meta.id, 1), () =>
+      first.ctx.sessionPersistence.append(meta.id, suffix))
+    await first.dispose()
+    disposers.splice(disposers.indexOf(first.dispose), 1)
+
+    const pool = new Pool({ connectionString: databaseUrl as string })
+    try {
+      const checkpoint = await pool.query<{ throughSeq: string; eventCount: string }>(`
+        SELECT through_seq::text AS "throughSeq", event_count::text AS "eventCount"
+        FROM dsh_cloud.session_restore_checkpoints
+        WHERE namespace=$1 AND session_id=$2
+      `, [namespace, meta.id])
+      expect(checkpoint.rows[0]).toEqual({ throughSeq: '9', eventCount: '10' })
+
+      // Damage a canonical segment wholly below the checkpoint boundary. A
+      // cold resume must not read it, proving the physical prefix is skipped.
+      await pool.query(`
+        UPDATE dsh_cloud.session_segments SET payload=$3
+        WHERE namespace=$1 AND session_id=$2 AND seq_end < 10
+      `, [namespace, meta.id, Buffer.from('deliberately unreadable old segment')])
+    } finally {
+      await pool.end()
+    }
+
+    const resumed = await backend(namespace)
+    const loaded = await resumed.ctx.cloudRunContext.run(authority(meta.id, 2), () =>
+      resumed.ctx.sessionPersistence.load(meta.id))
+    expect(loaded.events).toEqual([...compacted, ...suffix])
+  })
+
+  it('repairs an interrupted suffix after restoring a compaction checkpoint', async () => {
+    const namespace = `test-${randomUUID()}`
+    const first = await backend(namespace)
+    const meta = header('checkpoint-interrupted')
+    const compacted = [...completedTurn(), ...compaction(6, [1, 3], 'stable summary')]
+    await first.ctx.sessionPersistence.create(meta)
+    await first.ctx.cloudRunContext.run(authority(meta.id, 3), async () => {
+      await first.ctx.sessionPersistence.append(meta.id, compacted)
+      await first.ctx.sessionPersistence.append(meta.id, [
+        { type: 'turn/start', seq: 10, time: 20, data: { turn: 2 } },
+        { type: 'step/start', seq: 11, time: 21, data: { turn: 2, step: 1 } },
+      ])
+    })
+    await first.dispose()
+    disposers.splice(disposers.indexOf(first.dispose), 1)
+
+    const resumed = await backend(namespace)
+    const loaded = await resumed.ctx.cloudRunContext.run(authority(meta.id, 4), () =>
+      resumed.ctx.sessionPersistence.load(meta.id))
+    expect(loaded.events.slice(0, compacted.length)).toEqual(compacted)
+    expect(loaded.events.slice(-2).map(event => event.type)).toEqual(['step/end', 'turn/end'])
+    const final = loaded.events.at(-1)
+    expect(final?.type === 'turn/end' ? final.data.reason : undefined)
+      .toEqual({ kind: 'interrupted' })
+  })
+
+  it('atomically advances one restore checkpoint across repeated compactions', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const meta = header('checkpoint-repeated')
+    const firstCompaction = [...completedTurn(), ...compaction(6, [1, 3], 'first summary')]
+    const secondTurn = completedTurn(10, 2)
+    const secondCompaction = compaction(16, [8, 11, 13], 'second summary', 2)
+    await ctx.sessionPersistence.create(meta)
+    await ctx.cloudRunContext.run(authority(meta.id, 5), async () => {
+      await ctx.sessionPersistence.append(meta.id, firstCompaction)
+      await ctx.sessionPersistence.append(meta.id, secondTurn)
+      await ctx.sessionPersistence.append(meta.id, secondCompaction)
+    })
+
+    const pool = new Pool({ connectionString: databaseUrl as string })
+    try {
+      const checkpoints = await pool.query<{ count: string; throughSeq: string }>(`
+        SELECT count(*)::text AS count, max(through_seq)::text AS "throughSeq"
+        FROM dsh_cloud.session_restore_checkpoints
+        WHERE namespace=$1 AND session_id=$2
+      `, [namespace, meta.id])
+      expect(checkpoints.rows[0]).toEqual({ count: '1', throughSeq: '19' })
+    } finally {
+      await pool.end()
+    }
+    expect((await ctx.sessionPersistence.load(meta.id)).events)
+      .toEqual([...firstCompaction, ...secondTurn, ...secondCompaction])
+  })
+
+  it('falls back to the canonical log when derived checkpoint bytes are damaged', async () => {
+    const namespace = `test-${randomUUID()}`
+    const first = await backend(namespace)
+    const meta = header('checkpoint-fallback')
+    const log = [...completedTurn(), ...compaction(6, [1, 3], 'fallback summary')]
+    await first.ctx.sessionPersistence.create(meta)
+    await first.ctx.cloudRunContext.run(authority(meta.id, 6), () =>
+      first.ctx.sessionPersistence.append(meta.id, log))
+    await first.dispose()
+    disposers.splice(disposers.indexOf(first.dispose), 1)
+
+    const pool = new Pool({ connectionString: databaseUrl as string })
+    try {
+      await pool.query(`
+        UPDATE dsh_cloud.session_restore_checkpoints SET payload=$3
+        WHERE namespace=$1 AND session_id=$2
+      `, [namespace, meta.id, Buffer.from('damaged derived checkpoint')])
+    } finally {
+      await pool.end()
+    }
+
+    const resumed = await backend(namespace)
+    const loaded = await resumed.ctx.cloudRunContext.run(authority(meta.id, 7), () =>
+      resumed.ctx.sessionPersistence.load(meta.id))
+    expect(loaded.events).toEqual(log)
   })
 })

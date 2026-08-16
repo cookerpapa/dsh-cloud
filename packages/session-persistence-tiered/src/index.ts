@@ -43,10 +43,11 @@ export {
   type SessionEventEnvelope,
 } from '@dsh-cloud/session-live'
 
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 const SQL_SCHEMA = 'dsh_cloud'
 const DEFAULT_NAMESPACE = 'local'
 const SEGMENT_CODEC = 'dsh-storage-records+json+gzip-v1'
+const RESTORE_CHECKPOINT_CODEC = 'dsh-native-session-log+json+gzip-v1'
 
 interface SessionRow {
   header: SessionHeader
@@ -83,6 +84,14 @@ interface SegmentRow {
 interface EncodedSegment {
   seq: number
   seqEnd: number
+  payload: Buffer
+  sha256: string
+}
+
+interface RestoreCheckpointRow {
+  through_seq: string
+  event_count: string
+  codec: string
   payload: Buffer
   sha256: string
 }
@@ -232,6 +241,44 @@ function decodeSegment(row: SegmentRow): SessionEvent[] {
   }
   assertContiguous(events, seq)
   return events
+}
+
+function encodeRestoreCheckpoint(events: readonly SessionEvent[]): EncodedSegment {
+  const first = events[0]
+  if (first === undefined || first.seq !== 0) {
+    throw new Error('Session restore checkpoint must start at seq 0')
+  }
+  const encoded = encodeSegment(events)
+  return { ...encoded }
+}
+
+function decodeRestoreCheckpoint(row: RestoreCheckpointRow): SessionEvent[] {
+  if (row.codec !== RESTORE_CHECKPOINT_CODEC) {
+    throw new Error(`unsupported Session restore checkpoint codec "${row.codec}"`)
+  }
+  const events = decodeSegment({
+    seq: '0',
+    seq_end: row.through_seq,
+    codec: SEGMENT_CODEC,
+    payload: row.payload,
+    sha256: row.sha256,
+  })
+  const eventCount = safeInteger(row.event_count, 'restore checkpoint event count')
+  if (events.length !== eventCount) {
+    throw new Error(`corrupt Session restore checkpoint event count ${eventCount}`)
+  }
+  return events
+}
+
+function completedCompaction(events: readonly SessionEvent[]): boolean {
+  return events.some(event => {
+    // Compaction events declaration-merge into SessionEventMap only when the
+    // optional compaction plugin is installed. Persistence remains plugin-
+    // agnostic and recognizes the stable wire type without importing it.
+    if (String(event.type) !== 'compaction/end') return false
+    const data = object(event.data)
+    return data !== undefined && data['error'] === undefined
+  })
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {
@@ -413,7 +460,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       signal?.throwIfAborted()
       const row = await this.sessionRow(client, id)
       if (row === undefined) return undefined
-      const events = await this.loadPhysicalEvents(client, id, 0)
+      const events = await this.loadRestoreEvents(client, id)
       signal?.throwIfAborted()
       const scanned = scanRows(storageRows(events).map(item => ({
         seq: String(item.seq),
@@ -557,6 +604,22 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
         sealedThrough,
         expected + events.length - 1,
       ])
+      if (completedCompaction(events)) {
+        // This row is an accelerator, never part of the native Session commit.
+        // A cache construction failure must not turn a valid DSH Compaction
+        // into a persistence failure or leave the transaction aborted.
+        await client.query('SAVEPOINT dsh_restore_checkpoint')
+        try {
+          await this.writeRestoreCheckpoint(client, meta.id, expected + events.length)
+          await client.query('RELEASE SAVEPOINT dsh_restore_checkpoint')
+        } catch (error) {
+          await client.query('ROLLBACK TO SAVEPOINT dsh_restore_checkpoint')
+          await client.query('RELEASE SAVEPOINT dsh_restore_checkpoint')
+          this.ctx.logger.warn(
+            `session "${meta.id}": restore checkpoint construction failed; canonical Compaction remains authoritative: ${String(error)}`,
+          )
+        }
+      }
       await client.query(`SELECT pg_notify('dsh_cloud_session_projection',$1)`, [String(meta.id)])
     })
   }
@@ -756,6 +819,75 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
     return events
   }
 
+  /**
+   * Restore the exact native DSH log from the latest verified checkpoint plus
+   * its physical suffix. The checkpoint is only a read accelerator: canonical
+   * Turn segments and Kafka tail locations remain the authority and are kept
+   * for audit/history reads.
+   */
+  private async loadRestoreEvents(client: PoolClient, id: SessionId): Promise<SessionEvent[]> {
+    const result = await client.query<RestoreCheckpointRow>(`
+      SELECT through_seq::text, event_count::text, codec, payload, sha256
+      FROM ${SQL_SCHEMA}.session_restore_checkpoints
+      WHERE namespace = $1 AND session_id = $2
+    `, [this.namespace, id])
+    const checkpoint = result.rows[0]
+    if (checkpoint === undefined) return this.loadPhysicalEvents(client, id, 0)
+
+    try {
+      const prefix = decodeRestoreCheckpoint(checkpoint)
+      const throughSeq = safeInteger(checkpoint.through_seq, 'restore checkpoint through seq')
+      const suffix = await this.loadPhysicalEvents(client, id, throughSeq + 1)
+      const events = [...prefix, ...suffix]
+      assertContiguous(events, 0)
+      return events
+    } catch (error) {
+      // Restore checkpoints are derived acceleration data. A damaged cache must
+      // never make the canonical Session unavailable while its source log is sound.
+      this.ctx.logger.warn(
+        `session "${id}": restore checkpoint rejected; falling back to canonical log: ${String(error)}`,
+      )
+      return this.loadPhysicalEvents(client, id, 0)
+    }
+  }
+
+  /** Materialize the latest verified full-native-log checkpoint after compaction. */
+  private async writeRestoreCheckpoint(
+    client: PoolClient,
+    id: SessionId,
+    expectedNextSeq: number,
+  ): Promise<void> {
+    const events = await this.loadPhysicalEvents(client, id, 0)
+    if (events.length !== expectedNextSeq) {
+      throw new Error(
+        `Session restore checkpoint expected ${expectedNextSeq} events, loaded ${events.length}`,
+      )
+    }
+    assertContiguous(events, 0)
+    const checkpoint = encodeRestoreCheckpoint(events)
+    await client.query(`
+      INSERT INTO ${SQL_SCHEMA}.session_restore_checkpoints
+        (namespace, session_id, through_seq, event_count, codec, payload, sha256)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (namespace, session_id) DO UPDATE
+      SET through_seq = EXCLUDED.through_seq,
+          event_count = EXCLUDED.event_count,
+          codec = EXCLUDED.codec,
+          payload = EXCLUDED.payload,
+          sha256 = EXCLUDED.sha256,
+          created_at = now()
+      WHERE ${SQL_SCHEMA}.session_restore_checkpoints.through_seq < EXCLUDED.through_seq
+    `, [
+      this.namespace,
+      id,
+      checkpoint.seqEnd,
+      events.length,
+      RESTORE_CHECKPOINT_CODEC,
+      checkpoint.payload,
+      checkpoint.sha256,
+    ])
+  }
+
   private async publishLiveBatches(
     client: PoolClient,
     id: SessionId,
@@ -944,7 +1076,16 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       const schema = await client.query<{ version: number }>(`
         SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton = true
       `)
-      const storedVersion = schema.rows[0]?.version
+      let storedVersion = schema.rows[0]?.version
+      if (storedVersion === 5) {
+        // Version 6 adds derived restore-checkpoint storage only; all canonical
+        // Session tables and bytes remain unchanged.
+        await client.query(`
+          UPDATE ${SQL_SCHEMA}.schema_state SET version = $1
+          WHERE singleton = true AND version = 5
+        `, [SCHEMA_VERSION])
+        storedVersion = SCHEMA_VERSION
+      }
       if (storedVersion !== SCHEMA_VERSION) {
         throw new Error(
           `PostgreSQL session schema version ${String(storedVersion)} is incompatible with ${SCHEMA_VERSION}; reset this pre-production database`,
@@ -1016,6 +1157,22 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
           digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
           created_at timestamptz NOT NULL DEFAULT now(),
           PRIMARY KEY (namespace, session_id, seq),
+          FOREIGN KEY (namespace, session_id)
+            REFERENCES ${SQL_SCHEMA}.sessions(namespace, id)
+            ON DELETE CASCADE
+        )
+      `)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_restore_checkpoints (
+          namespace text NOT NULL,
+          session_id text NOT NULL,
+          through_seq bigint NOT NULL CHECK (through_seq >= 0),
+          event_count bigint NOT NULL CHECK (event_count = through_seq + 1),
+          codec text NOT NULL,
+          payload bytea NOT NULL,
+          sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (namespace, session_id),
           FOREIGN KEY (namespace, session_id)
             REFERENCES ${SQL_SCHEMA}.sessions(namespace, id)
             ON DELETE CASCADE
