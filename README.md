@@ -143,7 +143,9 @@ Important lifecycle values are deliberately shared across components:
 Workers heartbeat every five seconds. The default 20-second Run lease therefore
 tolerates transient database delays while still fencing an abandoned Attempt
 quickly. Changing the lease in only the Tool Broker or only the Workers is an
-invalid deployment.
+invalid deployment. The Compose Workers use a 600-second stop grace, matching
+the Helm termination grace and keeping the 540-second application drain inside
+the orchestrator deadline.
 
 ## Kubernetes deployment
 

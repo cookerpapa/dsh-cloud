@@ -16,6 +16,7 @@ run:
   leaseSeconds: 20
 gateway:
   replicas: 2
+  dbPool: 20
   secureCookies: true
   eventProjectionTimeoutMs: 90000
   service:

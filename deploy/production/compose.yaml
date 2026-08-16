@@ -119,6 +119,7 @@ services:
       dockerfile: deploy/docker/Dockerfile.services
       target: worker
     restart: unless-stopped
+    stop_grace_period: 600s
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
@@ -136,6 +137,7 @@ services:
   worker-2:
     build: *worker-build
     restart: unless-stopped
+    stop_grace_period: 600s
     depends_on:
       postgres: { condition: service_healthy }
       kafka: { condition: service_healthy }
@@ -165,6 +167,7 @@ services:
       DSH_CLOUD_NAMESPACE: ${DSH_CLOUD_NAMESPACE:-production}
       DSH_CLOUD_GATEWAY_HOST: 0.0.0.0
       DSH_CLOUD_GATEWAY_PORT: 8080
+      DSH_CLOUD_GATEWAY_DB_POOL: ${DSH_CLOUD_GATEWAY_DB_POOL:-20}
       DSH_CLOUD_SECURE_COOKIES: ${DSH_CLOUD_SECURE_COOKIES:-0}
       DSH_CLOUD_PUBLIC_ORIGIN: ${DSH_CLOUD_PUBLIC_ORIGIN:-}
       DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS: ${DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS:-90000}

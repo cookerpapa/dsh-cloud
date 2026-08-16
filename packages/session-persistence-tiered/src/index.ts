@@ -1131,18 +1131,7 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       const schema = await client.query<{ version: number }>(`
         SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton = true
       `)
-      let storedVersion = schema.rows[0]?.version
-      if (storedVersion === 6) {
-        // Version 7 replaces full-log restore accelerators with logical runtime
-        // baselines. Discard that derived table rather than shipping an old
-        // codec compatibility path; canonical Session data remains untouched.
-        await client.query(`DROP TABLE IF EXISTS ${SQL_SCHEMA}.session_restore_checkpoints`)
-        await client.query(`
-          UPDATE ${SQL_SCHEMA}.schema_state SET version = $1
-          WHERE singleton = true AND version = 6
-        `, [SCHEMA_VERSION])
-        storedVersion = SCHEMA_VERSION
-      }
+      const storedVersion = schema.rows[0]?.version
       if (storedVersion !== SCHEMA_VERSION) {
         throw new Error(
           `PostgreSQL session schema version ${String(storedVersion)} is incompatible with ${SCHEMA_VERSION}; reset this pre-production database`,
