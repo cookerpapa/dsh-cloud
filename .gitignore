@@ -1,5 +1,7 @@
 node_modules/
 lib/
+!scripts/lib/
+!scripts/lib/*.mjs
 coverage/
 .data/
 .env

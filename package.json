@@ -26,6 +26,8 @@
     "start:gateway": "node apps/gateway/lib/main.js",
     "start:broker": "node packages/tool-broker/lib/main.js",
     "acceptance:real-user": "node scripts/real-user-acceptance.mjs",
+    "acceptance:concurrent": "node scripts/concurrent-real-user-acceptance.mjs",
+    "benchmark:components": "node scripts/component-throughput.mjs",
     "start": "node apps/cloud-web/lib/main.js",
     "test": "vitest run",
     "test:integration": "DSH_CLOUD_TEST_DATABASE_URL=${DSH_CLOUD_TEST_DATABASE_URL:-postgresql://dsh_cloud:dsh_cloud@127.0.0.1:5438/dsh_cloud} DSH_CLOUD_TEST_KAFKA_BROKERS=${DSH_CLOUD_TEST_KAFKA_BROKERS:-127.0.0.1:9094} DSH_CLOUD_TEST_VALKEY_URL=${DSH_CLOUD_TEST_VALKEY_URL:-redis://127.0.0.1:6380} vitest run packages/session-persistence-tiered packages/control-store packages/tool-broker apps/cloud-web apps/gateway tests"

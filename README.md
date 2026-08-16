@@ -90,6 +90,10 @@ pnpm test:integration
 the released DSH Web profile through the Cloud overlay before fetching the
 official frontend. CI runs both gates on every push.
 
+Real-model multi-user journeys and isolated Kafka/PostgreSQL capacity probes
+are intentionally separate from CI. Their reproducible commands, workload
+models and grading rules are documented in [Testing DSH Cloud](docs/testing.md).
+
 See [the documentation map](docs/README.md) and
 [architecture document](docs/architecture.md) for ownership and failure
 boundaries. Operator-facing settings and their cross-component contracts are
