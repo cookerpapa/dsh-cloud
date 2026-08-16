@@ -2,9 +2,11 @@ import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { ApiProxy, RpcId, RpcResponse } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { Pool } from 'pg'
 import { ControlStore } from '@dsh-cloud/control-store'
 import { cloudIdentifier, writerFence } from '@dsh-cloud/run-context'
+import type { RunAuthority } from '@dsh-cloud/run-context'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { apiProxy: ApiProxy }
@@ -13,8 +15,12 @@ declare module '@deepseek-ai/cordis' {
 export interface Config { connectionString: string; namespace?: string }
 
 /** Installs PostgreSQL-issued Run authority around the upstream prompt admission call. */
+interface AuthorityAwareSessionPersistence extends SessionPersistence {
+  bindRunAuthority?: (authority: RunAuthority) => void
+}
+
 class RunAdmission {
-  static inject = ['apiProxy', 'cloudRunContext']
+  static inject = ['apiProxy', 'cloudRunContext', 'sessionPersistence']
   static Config: z<Config> = z.object({ connectionString: z.string().required(), namespace: z.string().default('default') })
   private readonly pool: Pool
 
@@ -33,14 +39,16 @@ class RunAdmission {
           result: { ok: false, error: { code: 'internal', message: 'cloud Run authority is missing or stale', details: {} } },
         }
       }
-      return ctx.cloudRunContext.run({
+      const runAuthority: RunAuthority = {
         tenantId: cloudIdentifier('TenantId', authority.tenantId),
         workspaceId: cloudIdentifier('WorkspaceId', authority.workspaceId),
         sessionId: cloudIdentifier('SessionId', authority.sessionId),
         runId: cloudIdentifier('RunId', authority.runId),
         attemptId: cloudIdentifier('AttemptId', authority.attemptId),
         writerFence: writerFence(authority.writerFence),
-      }, operation)
+      }
+      ;(ctx.sessionPersistence as AuthorityAwareSessionPersistence).bindRunAuthority?.(runAuthority)
+      return ctx.cloudRunContext.run(runAuthority, operation)
     }
     ctx.apiProxy.sessions.prompt = request => run(request, () => prompt(request))
     ctx.apiProxy.sessions.rename = request => run(request, () => rename(request))

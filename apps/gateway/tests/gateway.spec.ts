@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { Pool } from 'pg'
+import WebSocket, { WebSocketServer } from 'ws'
 import { CloudGateway } from '../src/server.js'
 
 const connectionString=process.env['DSH_CLOUD_TEST_DATABASE_URL']
@@ -13,7 +14,7 @@ function close(server:Server):Promise<void>{return new Promise((resolve,reject)=
 enabled('multi-tenant Cloud Gateway',()=>{
   const namespace=`gateway-${randomUUID()}`
   const pool=new Pool({connectionString,max:10})
-  let fake:Server,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
+  let fake:Server,fakeSockets:WebSocketServer,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
 
   beforeAll(async()=>{
     fake=createServer(async(request,response)=>{
@@ -26,6 +27,15 @@ enabled('multi-tenant Cloud Gateway',()=>{
       if(envelope.method==='session.history')value={events:[],hasMore:false}
       const body=JSON.stringify({type:'server-response',rpcId:envelope.rpcId,result:{ok:true,value}});response.writeHead(200,{'content-type':'application/json','content-length':String(Buffer.byteLength(body))});response.end(body)
     })
+    fakeSockets=new WebSocketServer({noServer:true})
+    fake.on('upgrade',(request,socket,head)=>{
+      fakeSockets.handleUpgrade(request,socket,head,upstream=>{
+        upstream.send(JSON.stringify({
+          type:'server-request',rpcId:randomUUID(),
+          payload:{type:'session/subscribed',sessionId:ownedSession,lastSeq:-1},
+        }))
+      })
+    })
     const workerPort=await listen(fake)
     gateway=new CloudGateway({pool,namespace,secureCookies:false,sandboxManager:{url:`http://127.0.0.1:${workerPort}`,token:'test-manager-token'}})
     await gateway.initialize()
@@ -33,7 +43,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
     await gateway.listen(0,'127.0.0.1');baseUrl=`http://127.0.0.1:${gateway.address()!.port}`
   })
 
-  afterAll(async()=>{await gateway.close();await close(fake);await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1',[namespace]);await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1',[namespace]);await pool.end()})
+  afterAll(async()=>{await gateway.close();await new Promise<void>(resolve=>fakeSockets.close(()=>resolve()));await close(fake);await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1',[namespace]);await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1',[namespace]);await pool.end()})
 
   test('requires login, creates a tenant and serves the upstream UI',async()=>{
     expect(await (await fetch(baseUrl)).text()).toContain('登录后进入')
@@ -68,6 +78,19 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const response=await fetch(`${baseUrl}/api/session.history`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.history',payload:{sessionId:ownedSession}})})
     const value=await response.json() as {result:{ok:boolean;value:{events:unknown[]}}}
     expect(value.result).toMatchObject({ok:true,value:{events:[]}})
+  })
+
+  test('opens the private Worker stream before the browser and preserves text frames',async()=>{
+    const url=new URL('/api/events.mux',baseUrl);url.protocol='ws:'
+    const client=new WebSocket(url,{headers:{cookie}})
+    const frame=await new Promise<{binary:boolean;value:Record<string,unknown>}>((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error('Gateway event frame timed out')),5_000)
+      client.once('message',(data,binary)=>{clearTimeout(timeout);resolve({binary,value:JSON.parse(data.toString()) as Record<string,unknown>})})
+      client.once('error',error=>{clearTimeout(timeout);reject(error)})
+    })
+    expect(frame.binary).toBe(false)
+    expect(frame.value).toMatchObject({payload:{type:'session/subscribed',sessionId:ownedSession}})
+    client.close()
   })
 
   test('denies upstream Host mutations that have no tenant-scoped cloud contract',async()=>{

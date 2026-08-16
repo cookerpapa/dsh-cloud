@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { gzipSync, gunzipSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
 import {
   decodeStorageRecord,
@@ -27,16 +28,31 @@ import z from '@deepseek-ai/schemastery'
 import { Pool, type PoolClient } from 'pg'
 import type CloudRunContext from '@dsh-cloud/run-context'
 import type { RunAuthority } from '@dsh-cloud/run-context'
+import {
+  SESSION_EVENT_ENVELOPE_VERSION,
+  sessionEventEnvelopeDigest,
+  type SessionEventEnvelope,
+} from './event-envelope.js'
 
-const SCHEMA_VERSION = 2
+export {
+  envelopeEvents,
+  parseSessionEventEnvelope,
+  sessionEventEnvelopeDigest,
+  type SessionEventEnvelope,
+} from './event-envelope.js'
+
+const SCHEMA_VERSION = 3
 const SQL_SCHEMA = 'dsh_cloud'
 const DEFAULT_NAMESPACE = 'local'
+const SEGMENT_CODEC = 'dsh-storage-records+json+gzip-v1'
 
 interface SessionRow {
   header: SessionHeader
   incarnation: string
   revision: string
   next_seq: string
+  sealed_through: string
+  projected_through: string
   writer_fence: string
   writer_attempt_id: string | null
 }
@@ -45,6 +61,28 @@ interface EventRow {
   seq: string
   seq_end: string
   event: StorageRecord
+}
+
+interface SegmentRow {
+  seq: string
+  seq_end: string
+  codec: string
+  payload: Buffer
+  sha256: string
+}
+
+interface EncodedSegment {
+  seq: number
+  seqEnd: number
+  payload: Buffer
+  sha256: string
+}
+
+interface SessionMarker {
+  seq: number
+  type: 'user/message' | 'turn/end'
+  rpcId?: string
+  reason?: unknown
 }
 
 interface WriterAuthority {
@@ -86,6 +124,14 @@ function safeInteger(value: string, field: string): number {
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
     throw new Error(`stored ${field} is not a non-negative safe integer`)
+  }
+  return parsed
+}
+
+function safeWatermark(value: string, field: string): number {
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < -1) {
+    throw new Error(`stored ${field} is not a safe event watermark`)
   }
   return parsed
 }
@@ -138,6 +184,64 @@ function storageRows(events: readonly SessionEvent[]): Array<{ seq: number; seqE
   })
 }
 
+function encodeSegment(events: readonly SessionEvent[]): EncodedSegment {
+  const first = events[0]
+  const last = events.at(-1)
+  if (first === undefined || last === undefined) throw new Error('cannot encode an empty Session segment')
+  assertContiguous(events, first.seq)
+  const payload = gzipSync(Buffer.from(JSON.stringify(storageRows(events).map(row => row.record))), { level: 6 })
+  return {
+    seq: first.seq,
+    seqEnd: last.seq,
+    payload,
+    sha256: createHash('sha256').update(payload).digest('hex'),
+  }
+}
+
+function decodeSegment(row: SegmentRow): SessionEvent[] {
+  if (row.codec !== SEGMENT_CODEC) throw new Error(`unsupported Session segment codec "${row.codec}"`)
+  const digest = createHash('sha256').update(row.payload).digest('hex')
+  if (digest !== row.sha256) throw new Error('corrupt Session segment digest')
+  let records: unknown
+  try {
+    records = JSON.parse(gunzipSync(row.payload).toString('utf8'))
+  } catch (error) {
+    throw new Error('corrupt compressed Session segment', { cause: error })
+  }
+  if (!Array.isArray(records)) throw new Error('corrupt Session segment record collection')
+  const events = records.flatMap(record => decodeStorageRecord(record as StorageRecord))
+  const seq = safeInteger(row.seq, 'segment seq')
+  const seqEnd = safeInteger(row.seq_end, 'segment end seq')
+  if (events[0]?.seq !== seq || events.at(-1)?.seq !== seqEnd) {
+    throw new Error(`corrupt Session segment range ${seq}-${seqEnd}`)
+  }
+  assertContiguous(events, seq)
+  return events
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function markers(events: readonly SessionEvent[]): SessionMarker[] {
+  const output: SessionMarker[] = []
+  for (const event of events) {
+    if (event.type === 'user/message') {
+      const rpcId = object(object(event.data)?.['source'])?.['rpcId']
+      output.push({
+        seq: event.seq,
+        type: 'user/message',
+        ...(typeof rpcId === 'string' && rpcId.length > 0 ? { rpcId } : {}),
+      })
+    } else if (event.type === 'turn/end') {
+      output.push({ seq: event.seq, type: 'turn/end', reason: object(event.data)?.['reason'] ?? null })
+    }
+  }
+  return output
+}
+
 function scanRows(rows: readonly EventRow[], expectedStart = 0): { events: SessionEvent[]; tornFrom?: number } {
   const expanded: SessionEvent[] = []
   for (const row of rows) {
@@ -168,7 +272,9 @@ function scanRows(rows: readonly EventRow[], expectedStart = 0): { events: Sessi
       && typeof event.type === 'string'
     if (!validEnvelope || seq !== expectedStart + index) {
       if (index <= lastTurnEnd) {
-        throw new Error(`corrupt session log: seq gap or invalid event in committed region at ${expectedStart + index}`)
+        throw new Error(
+          `corrupt session log: expected seq ${expectedStart + index}, got ${String(seq)} (${String(event?.type)})`,
+        )
       }
       return { events, tornFrom: expectedStart + index }
     }
@@ -203,6 +309,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
   private readonly attemptLeaseSeconds: number
   private readonly ready: Promise<void>
   private readonly coordinator: PersistenceCoordinator<number>
+  private readonly boundAuthorities = new Map<string, Readonly<RunAuthority>>()
   private storeId = ''
 
   constructor(ctx: Context, readonly config: Config) {
@@ -240,6 +347,23 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
     return this.coordinator.append(id, events)
   }
 
+  /**
+   * Carry the latest RunAttempt identity into DSH's detached write-behind task.
+   * This does not authorize a write: appendBatch validates the Lease/Fence in
+   * PostgreSQL again before committing any event.
+   */
+  bindRunAuthority(authority: RunAuthority): void {
+    const sessionId = String(authority.sessionId)
+    const frozen = Object.freeze({ ...authority })
+    this.boundAuthorities.delete(sessionId)
+    this.boundAuthorities.set(sessionId, frozen)
+    while (this.boundAuthorities.size > 10_000) {
+      const oldest = this.boundAuthorities.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.boundAuthorities.delete(oldest)
+    }
+  }
+
   override prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
     return this.coordinator.prepare(id, signal)
   }
@@ -267,14 +391,13 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
       signal?.throwIfAborted()
       const row = await this.sessionRow(client, id)
       if (row === undefined) return undefined
-      const result = await client.query<EventRow>(`
-        SELECT seq::text, seq_end::text, event
-        FROM ${SQL_SCHEMA}.session_events
-        WHERE namespace = $1 AND session_id = $2
-        ORDER BY session_events.seq ASC
-      `, [this.namespace, id])
+      const events = await this.loadPhysicalEvents(client, id, 0)
       signal?.throwIfAborted()
-      const scanned = scanRows(result.rows)
+      const scanned = scanRows(storageRows(events).map(item => ({
+        seq: String(item.seq),
+        seq_end: String(item.seqEnd),
+        event: item.record,
+      })))
       return {
         meta: structuredClone(row.header),
         events: scanned.events,
@@ -311,15 +434,8 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
       const row = await this.sessionRow(client, id)
       if (row === undefined) return undefined
       const nextSeq = safeInteger(row.next_seq, 'next seq')
-      const result = await client.query<EventRow>(`
-        SELECT seq::text, seq_end::text, event
-        FROM ${SQL_SCHEMA}.session_events
-        WHERE namespace = $1 AND session_id = $2 AND seq_end >= $3
-        ORDER BY session_events.seq ASC
-      `, [this.namespace, id, fromSeq])
+      const events = (await this.loadPhysicalEvents(client, id, fromSeq)).filter(event => event.seq >= fromSeq)
       signal?.throwIfAborted()
-      const firstStoredSeq = result.rows[0] === undefined ? fromSeq : safeInteger(result.rows[0].seq, 'storage row seq')
-      const events = scanRows(result.rows, firstStoredSeq).events.filter(event => event.seq >= fromSeq)
       for (let index = 0; index < events.length; index++) {
         if (events[index]?.seq !== fromSeq + index) throw new Error(`corrupt session log: suffix gap at seq ${fromSeq + index}`)
       }
@@ -348,6 +464,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
           VALUES ($1, $2, $3::jsonb, $4, 0, 0, $5, $6)
           ON CONFLICT (namespace, id) DO NOTHING
           RETURNING header, incarnation::text, revision::text, next_seq::text,
+                    sealed_through::text, projected_through::text,
                     writer_fence::text, writer_attempt_id
         `, [
           this.namespace,
@@ -365,6 +482,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
       } else {
         const locked = await client.query<SessionRow>(`
           SELECT header, incarnation::text, revision::text, next_seq::text,
+                 sealed_through::text, projected_through::text,
                  writer_fence::text, writer_attempt_id
           FROM ${SQL_SCHEMA}.sessions
           WHERE namespace = $1 AND id = $2
@@ -378,18 +496,19 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
 
       const expected = safeInteger(row.next_seq, 'next seq')
       assertContiguous(events, expected)
-      const records = storageRows(events)
-      await client.query(`
-        INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, seq_end, event)
-        SELECT $1, $2, (value->>'seq')::bigint, (value->>'seqEnd')::bigint, value->'record'
-        FROM jsonb_array_elements($3::jsonb) AS value
-      `, [this.namespace, meta.id, JSON.stringify(records)])
+      await this.insertHotBatch(client, meta.id, events)
+      const sealedThrough = await this.sealCompletedTurns(
+        client,
+        meta.id,
+        safeWatermark(row.sealed_through, 'sealed through'),
+      )
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
         SET next_seq = $3,
             revision = revision + 1,
             writer_fence = $4,
-            writer_attempt_id = $5
+            writer_attempt_id = $5,
+            sealed_through = $6
         WHERE namespace = $1 AND id = $2
       `, [
         this.namespace,
@@ -397,6 +516,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
         expected + events.length,
         authority.fence,
         authority.attemptId ?? null,
+        sealedThrough,
       ])
     })
   }
@@ -413,6 +533,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
       await this.assertControlAuthority(client, authority, meta.id)
       const locked = await client.query<SessionRow>(`
         SELECT header, incarnation::text, revision::text, next_seq::text,
+               sealed_through::text, projected_through::text,
                writer_fence::text, writer_attempt_id
         FROM ${SQL_SCHEMA}.sessions
         WHERE namespace = $1 AND id = $2
@@ -422,11 +543,16 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
       if (row === undefined) throw new Error(`session "${meta.id}" is not materialized`)
       this.assertWriter(row, authority, meta.id)
       const storedNext = safeInteger(row.next_seq, 'next seq')
+      const sealedThrough = safeWatermark(row.sealed_through, 'sealed through')
+      const projectedThrough = safeWatermark(row.projected_through, 'projected through')
       const appendAt = tornMarker ?? storedNext
       if (appendAt > storedNext) throw new Error('repair marker exceeds the stored session length')
       assertContiguous(closers, appendAt)
 
       if (tornMarker !== undefined) {
+        if (tornMarker <= sealedThrough || tornMarker <= projectedThrough) {
+          throw new Error('repair marker intersects already sealed or projected Session history')
+        }
         const crossing = await client.query(`
           SELECT 1 FROM ${SQL_SCHEMA}.session_events
           WHERE namespace=$1 AND session_id=$2 AND seq<$3 AND seq_end>=$3 LIMIT 1
@@ -436,21 +562,26 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
           DELETE FROM ${SQL_SCHEMA}.session_events
           WHERE namespace = $1 AND session_id = $2 AND seq >= $3
         `, [this.namespace, meta.id, tornMarker])
+        await client.query(`
+          DELETE FROM ${SQL_SCHEMA}.session_event_markers
+          WHERE namespace = $1 AND session_id = $2 AND seq >= $3
+        `, [this.namespace, meta.id, tornMarker])
+        await client.query(`
+          DELETE FROM ${SQL_SCHEMA}.session_event_outbox
+          WHERE namespace = $1 AND session_id = $2 AND seq >= $3
+        `, [this.namespace, meta.id, tornMarker])
       }
       if (closers.length > 0) {
-        const records = storageRows(closers)
-        await client.query(`
-          INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, seq_end, event)
-          SELECT $1, $2, (value->>'seq')::bigint, (value->>'seqEnd')::bigint, value->'record'
-          FROM jsonb_array_elements($3::jsonb) AS value
-        `, [this.namespace, meta.id, JSON.stringify(records)])
+        await this.insertHotBatch(client, meta.id, closers)
       }
+      const repairedSealedThrough = await this.sealCompletedTurns(client, meta.id, sealedThrough)
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
         SET next_seq = $3,
             revision = revision + 1,
             writer_fence = $4,
-            writer_attempt_id = $5
+            writer_attempt_id = $5,
+            sealed_through = $6
         WHERE namespace = $1 AND id = $2
       `, [
         this.namespace,
@@ -458,6 +589,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
         appendAt + closers.length,
         authority.fence,
         authority.attemptId ?? null,
+        repairedSealedThrough,
       ])
     })
   }
@@ -499,6 +631,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
   private writerAuthority(sessionId: SessionId): WriterAuthority {
     const runContext = this.ctx.get('cloudRunContext') as CloudRunContext | undefined
     const current = runContext?.current()
+      ?? this.boundAuthorities.get(String(sessionId))
     if (current === undefined) {
       if (this.requireWriterAuthority) {
         throw new Error('session persistence mutation requires active RunAttempt authority')
@@ -526,7 +659,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
          WHERE run.namespace=$1 AND run.id::text=$2 AND run.tenant_id::text=$3
            AND run.workspace_id::text=$4 AND run.session_id=$5
            AND attempt.id::text=$6 AND run.writer_fence=$7 AND attempt.writer_fence=$7
-           AND run.status IN ('claimed','dispatched','running','cancel_requested')
+           AND run.status IN ('claimed','dispatching','dispatched','running','cancel_requested')
            AND attempt.status IN ('claimed','running')
            AND attempt.heartbeat_at>now()-make_interval(secs=>$8)
       ) OR EXISTS (
@@ -568,6 +701,129 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
     }
   }
 
+  private async loadPhysicalEvents(
+    client: PoolClient,
+    id: SessionId,
+    fromSeq: number,
+  ): Promise<SessionEvent[]> {
+    const [segments, hot] = await Promise.all([
+      client.query<SegmentRow>(`
+        SELECT seq::text, seq_end::text, codec, payload, sha256
+        FROM ${SQL_SCHEMA}.session_segments segment
+        WHERE namespace = $1 AND session_id = $2 AND seq_end >= $3
+        ORDER BY segment.seq
+      `, [this.namespace, id, fromSeq]),
+      client.query<EventRow>(`
+        SELECT seq::text, seq_end::text, event
+        FROM ${SQL_SCHEMA}.session_events hot
+        WHERE namespace = $1 AND session_id = $2 AND seq_end >= $3
+        ORDER BY hot.seq
+      `, [this.namespace, id, fromSeq]),
+    ])
+    const events = [
+      ...segments.rows.flatMap(decodeSegment),
+      ...scanRows(hot.rows, hot.rows[0] === undefined ? fromSeq : safeInteger(hot.rows[0].seq, 'hot row seq')).events,
+    ].filter(event => event.seq >= fromSeq)
+    events.sort((left, right) => left.seq - right.seq)
+    return events
+  }
+
+  private async insertHotBatch(
+    client: PoolClient,
+    id: SessionId,
+    events: readonly SessionEvent[],
+  ): Promise<void> {
+    const records = storageRows(events)
+    await client.query(`
+      INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, seq_end, event)
+      SELECT $1, $2, (value->>'seq')::bigint, (value->>'seqEnd')::bigint, value->'record'
+      FROM jsonb_array_elements($3::jsonb) AS value
+    `, [this.namespace, id, JSON.stringify(records)])
+
+    const semantic = markers(events)
+    if (semantic.length > 0) {
+      await client.query(`
+        INSERT INTO ${SQL_SCHEMA}.session_event_markers
+          (namespace, session_id, seq, type, rpc_id, reason)
+        SELECT $1, $2, (value->>'seq')::bigint, value->>'type',
+               NULLIF(value->>'rpcId', ''), value->'reason'
+        FROM jsonb_array_elements($3::jsonb) AS value
+      `, [this.namespace, id, JSON.stringify(semantic)])
+    }
+
+    const envelope: SessionEventEnvelope = {
+      schemaVersion: SESSION_EVENT_ENVELOPE_VERSION,
+      namespace: this.namespace,
+      sessionId: String(id),
+      seq: events[0]!.seq,
+      seqEnd: events.at(-1)!.seq,
+      records: records.map(item => item.record),
+    }
+    await client.query(`
+      INSERT INTO ${SQL_SCHEMA}.session_event_outbox
+        (id, namespace, session_id, seq, seq_end, payload, digest)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+    `, [
+      randomUUID(),
+      this.namespace,
+      id,
+      envelope.seq,
+      envelope.seqEnd,
+      JSON.stringify(envelope),
+      sessionEventEnvelopeDigest(envelope),
+    ])
+  }
+
+  private async sealCompletedTurns(
+    client: PoolClient,
+    id: SessionId,
+    sealedThrough: number,
+  ): Promise<number> {
+    const hot = await client.query<EventRow>(`
+      SELECT seq::text, seq_end::text, event
+      FROM ${SQL_SCHEMA}.session_events hot
+      WHERE namespace = $1 AND session_id = $2
+      ORDER BY hot.seq
+    `, [this.namespace, id])
+    if (hot.rows.length === 0) return sealedThrough
+    const expectedStart = sealedThrough + 1
+    const events = scanRows(hot.rows, expectedStart).events
+    let segmentStart = 0
+    let nextSealedThrough = sealedThrough
+    for (let index = 0; index < events.length; index++) {
+      if (events[index]?.type !== 'turn/end') continue
+      const segment = encodeSegment(events.slice(segmentStart, index + 1))
+      await client.query(`
+        INSERT INTO ${SQL_SCHEMA}.session_segments
+          (namespace, session_id, seq, seq_end, codec, payload, sha256)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [
+        this.namespace,
+        id,
+        segment.seq,
+        segment.seqEnd,
+        SEGMENT_CODEC,
+        segment.payload,
+        segment.sha256,
+      ])
+      nextSealedThrough = segment.seqEnd
+      segmentStart = index + 1
+    }
+    if (nextSealedThrough > sealedThrough) {
+      const crossing = hot.rows.some((row) => {
+        const seq = safeInteger(row.seq, 'hot row seq')
+        const seqEnd = safeInteger(row.seq_end, 'hot row end seq')
+        return seq <= nextSealedThrough && seqEnd > nextSealedThrough
+      })
+      if (crossing) throw new Error('turn boundary intersects one packed hot Session row')
+      await client.query(`
+        DELETE FROM ${SQL_SCHEMA}.session_events
+        WHERE namespace = $1 AND session_id = $2 AND seq_end <= $3
+      `, [this.namespace, id, nextSealedThrough])
+    }
+    return nextSealedThrough
+  }
+
   private async initialize(): Promise<void> {
     await this.writeTransaction(async (client) => {
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${SQL_SCHEMA}`)
@@ -605,10 +861,72 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
           incarnation uuid NOT NULL,
           revision bigint NOT NULL CHECK (revision >= 0),
           next_seq bigint NOT NULL CHECK (next_seq >= 0),
+          sealed_through bigint NOT NULL DEFAULT -1 CHECK (sealed_through >= -1),
+          projected_through bigint NOT NULL DEFAULT -1 CHECK (projected_through >= -1),
           writer_fence bigint NOT NULL CHECK (writer_fence >= 0),
           writer_attempt_id text,
           PRIMARY KEY (namespace, id)
         )
+      `)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_segments (
+          namespace text NOT NULL,
+          session_id text NOT NULL,
+          seq bigint NOT NULL CHECK (seq >= 0),
+          seq_end bigint NOT NULL CHECK (seq_end >= seq),
+          codec text NOT NULL,
+          payload bytea NOT NULL,
+          sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+          created_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (namespace, session_id, seq),
+          FOREIGN KEY (namespace, session_id)
+            REFERENCES ${SQL_SCHEMA}.sessions(namespace, id)
+            ON DELETE CASCADE
+        )
+      `)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_event_markers (
+          namespace text NOT NULL,
+          session_id text NOT NULL,
+          seq bigint NOT NULL CHECK (seq >= 0),
+          type text NOT NULL CHECK (type IN ('user/message', 'turn/end')),
+          rpc_id text,
+          reason jsonb,
+          PRIMARY KEY (namespace, session_id, seq),
+          FOREIGN KEY (namespace, session_id)
+            REFERENCES ${SQL_SCHEMA}.sessions(namespace, id)
+            ON DELETE CASCADE
+        )
+      `)
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS session_event_markers_rpc
+        ON ${SQL_SCHEMA}.session_event_markers(namespace, session_id, rpc_id)
+        WHERE rpc_id IS NOT NULL
+      `)
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_event_outbox (
+          id uuid PRIMARY KEY,
+          namespace text NOT NULL,
+          session_id text NOT NULL,
+          seq bigint NOT NULL CHECK (seq >= 0),
+          seq_end bigint NOT NULL CHECK (seq_end >= seq),
+          payload jsonb NOT NULL,
+          digest text NOT NULL CHECK (digest ~ '^[0-9a-f]{64}$'),
+          attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+          available_at timestamptz NOT NULL DEFAULT now(),
+          lease_owner text,
+          lease_expires_at timestamptz,
+          last_error text,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          UNIQUE (namespace, session_id, seq),
+          FOREIGN KEY (namespace, session_id)
+            REFERENCES ${SQL_SCHEMA}.sessions(namespace, id)
+            ON DELETE CASCADE
+        )
+      `)
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS session_event_outbox_ready
+        ON ${SQL_SCHEMA}.session_event_outbox(available_at, created_at)
       `)
       await client.query(`
         CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.session_events (
@@ -640,6 +958,7 @@ class PostgresSessionPersistence extends SessionPersistence implements Persisten
   private async sessionRow(client: PoolClient, id: SessionId): Promise<SessionRow | undefined> {
     const result = await client.query<SessionRow>(`
       SELECT header, incarnation::text, revision::text, next_seq::text,
+             sealed_through::text, projected_through::text,
              writer_fence::text, writer_attempt_id
       FROM ${SQL_SCHEMA}.sessions
       WHERE namespace = $1 AND id = $2

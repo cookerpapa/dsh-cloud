@@ -121,6 +121,21 @@ integration('PostgresSessionPersistence', () => {
       .toEqual([3, 4, 5])
   })
 
+  it('retains Session authority for detached DSH write-behind flushes', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const meta = header('detached-write-behind')
+    const log = completedTurn()
+    await ctx.sessionPersistence.create(meta)
+    const runAuthority = authority(meta.id, 2)
+    ;(ctx.sessionPersistence as PostgresSessionPersistence).bindRunAuthority(runAuthority)
+    expect(ctx.cloudRunContext.current()).toBeUndefined()
+
+    await ctx.sessionPersistence.append(meta.id, log)
+
+    expect((await ctx.sessionPersistence.load(meta.id)).events).toEqual(log)
+  })
+
   it('rejects a stale Worker after a higher writer fence has committed', async () => {
     const namespace = `test-${randomUUID()}`
     const first = await backend(namespace)
@@ -137,9 +152,16 @@ integration('PostgresSessionPersistence', () => {
       resumed.ctx.sessionPersistence.append(meta.id, completedTurn(6, 2))))
       .rejects.toBeInstanceOf(StaleSessionWriterError)
 
-    await resumed.ctx.cloudRunContext.run(authority(meta.id, 5), () =>
-      resumed.ctx.sessionPersistence.append(meta.id, completedTurn(6, 2)))
-    expect((await resumed.ctx.sessionPersistence.load(meta.id)).events).toHaveLength(12)
+    // A rejected persistence batch poisons that in-memory coordinator by design;
+    // a fenced-out Worker is discarded rather than reused for another Attempt.
+    await resumed.dispose()
+    disposers.splice(disposers.indexOf(resumed.dispose), 1)
+    const current = await backend(namespace)
+    await current.ctx.sessionPersistence.load(meta.id)
+
+    await current.ctx.cloudRunContext.run(authority(meta.id, 5), () =>
+      current.ctx.sessionPersistence.append(meta.id, completedTurn(6, 2)))
+    expect((await current.ctx.sessionPersistence.load(meta.id)).events).toHaveLength(12)
   })
 
   it('does not let authority for one Session publish another Session', async () => {
@@ -239,12 +261,14 @@ integration('PostgresSessionPersistence', () => {
 
     const pool = new Pool({ connectionString: databaseUrl as string })
     try {
-      const rows = await pool.query<{ count: string }>(`
-        SELECT count(*)::text AS count
-        FROM dsh_cloud.session_events
-        WHERE namespace=$1 AND session_id=$2
+      const rows = await pool.query<{ hot: string; segments: string }>(`
+        SELECT
+          (SELECT count(*) FROM dsh_cloud.session_events
+            WHERE namespace=$1 AND session_id=$2)::text AS hot,
+          (SELECT count(*) FROM dsh_cloud.session_segments
+            WHERE namespace=$1 AND session_id=$2)::text AS segments
       `, [namespace, meta.id])
-      expect(Number(rows.rows[0]?.count)).toBeLessThan(log.length / 5)
+      expect(rows.rows[0]).toEqual({ hot: '0', segments: '1' })
     } finally {
       await pool.end()
     }

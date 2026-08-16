@@ -128,22 +128,23 @@ export class PostgresRunWorker {
 
   private async execute(run: ClaimedRun, signal: AbortSignal): Promise<void> {
     let promptDurable = false
+    let dispatchStarted = false
     const lease = { nextHeartbeatAt: Date.now() + this.heartbeatIntervalMs }
     try {
       if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
         await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
         return
       }
+      await this.options.store.markDispatching(run.runId, run.attemptId)
+      dispatchStarted = true
       const response = await this.options.backend.dispatch(run, signal)
       await this.options.store.markDispatched(run.runId, run.attemptId, response)
-      const promptDeadline = Date.now() + 15_000
       while (!(promptDurable = await this.options.store.promptPersisted(run.runId))) {
         if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
           await this.cancelAndAwaitSettlement(run, signal, lease)
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
           return
         }
-        if (Date.now() >= promptDeadline) throw Object.assign(new Error('accepted prompt did not become durable'), { code: 'prompt_durability_timeout' })
         await this.heartbeatIfDue(run, lease)
         await delay(50, undefined, { signal })
       }
@@ -174,8 +175,8 @@ export class PostgresRunWorker {
           await this.cancelAndAwaitSettlement(run, signal, lease)
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
         } else if (cancelled) await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
-        else if (!promptDurable && await this.options.store.attemptCount(run.runId) < this.maximumAttempts) await this.options.store.requeueBeforeStart(run.runId, run.attemptId, 500)
-        else if (!promptDurable) await this.options.store.finishRun(run.runId, run.attemptId, 'failed', 'dispatch_attempts_exhausted')
+        else if (!dispatchStarted && !promptDurable && await this.options.store.attemptCount(run.runId) < this.maximumAttempts) await this.options.store.requeueBeforeStart(run.runId, run.attemptId, 500)
+        else if (!promptDurable) await this.options.store.finishRun(run.runId, run.attemptId, 'failed', dispatchStarted ? 'prompt_dispatch_unknown' : 'dispatch_attempts_exhausted')
         else await this.options.store.finishRun(run.runId, run.attemptId, 'failed', error instanceof Error && 'code' in error ? String(error.code) : 'worker_execution_failed')
       } catch (settlementError) { this.observe(settlementError) }
       this.observe(error)

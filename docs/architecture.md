@@ -2,7 +2,7 @@
 
 ## Why a separate repository
 
-Pi and DSH expose different runtime and persistence models. AgentDock restores Pi-native sessions around short-lived Pi workers; DSH is already an event-sourced, Cordis-composed harness with replaceable Session, filesystem, and subprocess services. Sharing product concepts is useful, but sharing one runtime adapter would erase important semantics and increase upgrade risk.
+Pi and DSH expose different runtime and persistence models. Pi Cloud restores Pi-native sessions around short-lived Pi workers; DSH is already an event-sourced, Cordis-composed harness with replaceable Session, filesystem, and subprocess services. Sharing product concepts is useful, but sharing one runtime adapter would erase important semantics and increase upgrade risk.
 
 DSH Cloud therefore depends on released DSH packages and adds a Cloud profile. Upstream Web UI and Agent Loop updates remain ordinary dependency upgrades.
 
@@ -10,12 +10,13 @@ DSH Cloud therefore depends on released DSH packages and adds a Cloud profile. U
 
 | State | Authority | Cache allowed |
 | --- | --- | --- |
-| DSH Session events and metadata | PostgreSQL SessionPersistence | yes |
+| DSH Session metadata, settled Turn segments, active hot tail | PostgreSQL SessionPersistence | yes |
+| Durable live publication | Kafka, sourced through PostgreSQL Outbox | no |
 | Run/Attempt scheduling | PostgreSQL transactional Run queue | no |
 | Workspace files | persistent Cube Volume | attached to one active Cube |
 | Live processes | one Cube activation; disposable | no durable claim |
 | Model credentials | trusted Worker credential provider | no sandbox access |
-| UI projections | derived from durable Session events | yes |
+| UI live projection | Valkey, rebuildable from Kafka/PostgreSQL | yes |
 
 DSH Session events, not browser deltas or a reconstructed `messages[]`, are the conversation authority. A Worker may resume a Session on another machine by loading those events through the official persistence seam.
 
@@ -115,16 +116,29 @@ the platform may already have deleted its bytes.
 ## Browser durability
 
 The official DSH Worker emits fine-grained Session events. Before Gateway
-forwards a `session/event` frame, it verifies that PostgreSQL's native Session
-log has advanced through that event sequence. The upstream persistence
-coordinator coalesces adjacent events into one transaction. The PostgreSQL
-backend additionally uses DSH's lossless chunk codec to store consecutive text
-deltas as one ranged row (`seq..seq_end`) and expands them exactly when the
-official persistence contract reads the log. The browser and Harness therefore
-keep the original logical sequence while PostgreSQL performs substantially
-fewer row inserts. This barrier adds a small group-commit delay without turning
-each token into a separate write. Reconnection reads canonical history from
-PostgreSQL.
+forwards a `session/event` frame, it verifies that the durable live projection
+has advanced through that event sequence. The upstream persistence coordinator
+first coalesces adjacent events into a bounded batch. One PostgreSQL transaction
+appends that batch to the unfinished hot tail, records small semantic markers,
+and writes a transactional Outbox entry. The append returns only after commit,
+preserving DSH's official atomic first-write and append contract.
+
+Session Event Relay replicas claim the oldest Outbox entry for each Session,
+publish it to Kafka with `acks=all` and an idempotent producer, then append it
+to a sequence-checked Valkey Stream. Only after both acknowledgements does the
+Relay advance PostgreSQL's `projected_through` watermark. Gateway waits on that
+watermark before forwarding the event, so browser visibility never gets ahead
+of the durable Kafka record and rebuildable live projection. Retries are
+identified by Session sequence and a canonical SHA-256 digest.
+
+When `turn/end` is appended, the same Session transaction compresses all events
+since the previous terminal boundary into one immutable PostgreSQL segment and
+deletes the corresponding fine-grained hot rows. The segment uses DSH's native
+StorageRecord codec plus gzip and expands to the exact logical event sequence
+on recovery. PostgreSQL therefore keeps roughly one large row per Turn rather
+than one permanent row per token chunk; Kafka and Valkey retain only the
+bounded live-delivery horizon. There is no S3/MinIO dependency and no second
+SessionStorage authority.
 
 ## Implemented milestones
 
@@ -138,5 +152,5 @@ The implementation deliberately ends with PostgreSQL scheduling rather than a
 Temporal milestone. PostgreSQL already owns admission, leases, fencing and
 terminal commits; KEDA only changes Worker replica count from the queued-Run
 backlog. See the [latest acceptance report](reports/production-acceptance-latest.md)
-for the measured boundary and the [AgentDock alignment review](agentdock-alignment.md)
+for the measured boundary and the [Pi Cloud alignment review](pi-cloud-alignment.md)
 for the deliberate runtime-specific differences.

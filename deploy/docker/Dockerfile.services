@@ -23,6 +23,10 @@ FROM build AS manager-package
 RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
  pnpm --filter @dsh-cloud/sandbox-manager deploy --prod --legacy /out/manager
 
+FROM build AS relay-package
+RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
+ pnpm --filter @dsh-cloud/session-event-relay deploy --prod --legacy /out/relay
+
 FROM node:24-bookworm-slim AS worker
 ENV NODE_ENV=production
 WORKDIR /app
@@ -56,5 +60,16 @@ RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/d
 COPY --from=manager-package --chown=node:node /out/manager/ /app/
 USER node
 EXPOSE 3090
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["node","lib/main.js"]
+
+FROM node:24-bookworm-slim AS relay
+ENV NODE_ENV=production
+WORKDIR /app
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
+COPY --from=relay-package --chown=node:node /out/relay/ /app/
+USER node
+EXPOSE 3091
 ENTRYPOINT ["/usr/bin/tini","--"]
 CMD ["node","lib/main.js"]

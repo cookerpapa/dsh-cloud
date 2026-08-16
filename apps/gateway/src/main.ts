@@ -21,6 +21,7 @@ const gateway = new CloudGateway({
   namespace: process.env['DSH_CLOUD_NAMESPACE'] ?? 'default',
   ...(configuredOrigin === undefined || configuredOrigin === '' ? {} : { publicOrigin: configuredOrigin }),
   secureCookies: process.env['DSH_CLOUD_SECURE_COOKIES'] === '1',
+  eventProjectionTimeoutMs: Number(process.env['DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS'] ?? 90_000),
   sandboxManager: { url: managerUrl, token: managerToken },
 })
 await gateway.initialize()

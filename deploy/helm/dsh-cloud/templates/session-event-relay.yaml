@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ .Release.Name }}-session-event-relay, labels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: session-event-relay } }
+spec:
+  replicas: {{ .Values.relay.replicas }}
+  selector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: session-event-relay } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: session-event-relay }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: relay
+          image: {{ include "dsh-cloud.relayImage" . }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports: [{ name: health, containerPort: 3091 }]
+          env:
+            - { name: DSH_CLOUD_DATABASE_URL, valueFrom: { secretKeyRef: { name: {{ .Values.postgres.secretName }}, key: {{ .Values.postgres.urlKey }} } } }
+            - { name: DSH_CLOUD_NAMESPACE, value: {{ include "dsh-cloud.namespace" . | quote }} }
+            - { name: DSH_CLOUD_KAFKA_BROKERS, value: {{ .Values.kafka.brokers | quote }} }
+            - { name: DSH_CLOUD_KAFKA_SESSION_TOPIC, value: {{ .Values.kafka.topic | quote }} }
+            - { name: DSH_CLOUD_KAFKA_PARTITIONS, value: {{ .Values.kafka.partitions | quote }} }
+            - { name: DSH_CLOUD_KAFKA_REPLICATION_FACTOR, value: {{ .Values.kafka.replicationFactor | quote }} }
+            - { name: DSH_CLOUD_KAFKA_EVENT_RETENTION_MS, value: {{ .Values.kafka.eventRetentionMs | quote }} }
+            - { name: DSH_CLOUD_RELAY_LEASE_SECONDS, value: {{ .Values.relay.leaseSeconds | quote }} }
+            - { name: DSH_CLOUD_VALKEY_URL, value: {{ .Values.valkey.url | quote }} }
+            - { name: DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS, value: {{ .Values.valkey.liveEventRetentionSeconds | quote }} }
+          readinessProbe: { httpGet: { path: /health/ready, port: health }, initialDelaySeconds: 3, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /health/live, port: health }, periodSeconds: 10 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: {{- toYaml .Values.relay.resources | nindent 12 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: {{ .Release.Name }}-session-event-relay }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: session-event-relay } }

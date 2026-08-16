@@ -25,18 +25,22 @@
     "dev:gateway": "tsx apps/gateway/src/main.ts",
     "start:gateway": "node apps/gateway/lib/main.js",
     "start:manager": "node packages/sandbox-manager/lib/main.js",
+    "start:relay": "node apps/session-event-relay/lib/main.js",
+    "acceptance:real-user": "node scripts/real-user-acceptance.mjs",
     "start": "node apps/cloud-web/lib/main.js",
     "test": "vitest run",
-    "test:integration": "DSH_CLOUD_TEST_DATABASE_URL=${DSH_CLOUD_TEST_DATABASE_URL:-postgresql://dsh_cloud:dsh_cloud@127.0.0.1:5438/dsh_cloud} vitest run packages/session-persistence-postgres packages/control-store packages/sandbox-manager apps/cloud-web apps/gateway tests"
+    "test:integration": "DSH_CLOUD_TEST_DATABASE_URL=${DSH_CLOUD_TEST_DATABASE_URL:-postgresql://dsh_cloud:dsh_cloud@127.0.0.1:5438/dsh_cloud} vitest run packages/session-persistence-postgres packages/control-store packages/sandbox-manager apps/session-event-relay apps/cloud-web apps/gateway tests"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
     "@deepseek-ai/dsh-session": "0.1.0-rc.6",
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "pg": "^8.16.3",
     "tsx": "^4.20.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "ws": "^8.21.3"
   }
 }

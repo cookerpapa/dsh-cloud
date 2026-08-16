@@ -198,13 +198,17 @@ integration('cloud failure semantics', () => {
           VALUES($1,$2,$3,$4,1,1,$5,$6)
         `, [namespace, sessionId, JSON.stringify({ version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: Date.now(), cwd: '/workspace' }), randomUUID(), run.writerFence, run.attemptId])
         await pool.query(`
-          INSERT INTO dsh_cloud.session_events(namespace,session_id,seq,seq_end,event) VALUES($1,$2,0,0,$3)
-        `, [namespace, sessionId, JSON.stringify({ type: 'user/message', seq: 0, time: Date.now(), data: { source: { kind: 'user', rpcId } } })])
+          INSERT INTO dsh_cloud.session_event_markers(namespace,session_id,seq,type,rpc_id)
+          VALUES($1,$2,0,'user/message',$3)
+        `, [namespace, sessionId, rpcId])
         return { accepted: true }
       },
       async cancel(run: ClaimedRun): Promise<'accepted'> {
         cancelled = true
-        await pool.query(`INSERT INTO dsh_cloud.session_events(namespace,session_id,seq,seq_end,event) VALUES($1,$2,1,1,$3)`, [namespace, sessionId, JSON.stringify({ type: 'turn/end', seq: 1, time: Date.now(), data: { turn: 1, reason: { kind: 'interrupted' } } })])
+        await pool.query(`
+          INSERT INTO dsh_cloud.session_event_markers(namespace,session_id,seq,type,reason)
+          VALUES($1,$2,1,'turn/end',$3::jsonb)
+        `, [namespace, sessionId, JSON.stringify({ kind: 'interrupted' })])
         await pool.query(`UPDATE dsh_cloud.sessions SET next_seq=2,revision=revision+1 WHERE namespace=$1 AND id=$2`, [namespace, sessionId])
         return 'accepted'
       },
@@ -254,13 +258,13 @@ integration('cloud failure semantics', () => {
           VALUES($1,$2,$3,$4,1,2,$5,$6)
         `, [namespace, sessionId, JSON.stringify({ version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: Date.now(), cwd: '/workspace' }), randomUUID(), run.writerFence, run.attemptId])
         await pool.query(`
-          INSERT INTO dsh_cloud.session_events(namespace,session_id,seq,seq_end,event) VALUES
-            ($1,$2,0,0,$3),($1,$2,1,1,$4)
+          INSERT INTO dsh_cloud.session_event_markers(namespace,session_id,seq,type,rpc_id,reason) VALUES
+            ($1,$2,0,'user/message',$3,NULL),($1,$2,1,'turn/end',NULL,$4::jsonb)
         `, [
           namespace,
           sessionId,
-          JSON.stringify({ type: 'user/message', seq: 0, time: Date.now(), data: { source: { kind: 'user', rpcId } } }),
-          JSON.stringify({ type: 'turn/end', seq: 1, time: Date.now(), data: { turn: 1, reason: { kind: 'error', error: { message: 'provider transport failed', code: 'TRANSPORT' } } } }),
+          rpcId,
+          JSON.stringify({ kind: 'error', error: { message: 'provider transport failed', code: 'TRANSPORT' } }),
         ])
         return { accepted: true }
       },

@@ -2,16 +2,16 @@
 
 DSH Cloud is a self-hosted cloud distribution of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). It keeps the official DSH Web UI and Agent Loop, while moving durable sessions and the code-execution world behind cloud-safe service boundaries.
 
-This is a separate project from AgentDock. AgentDock remains the Pi-based reference implementation; DSH Cloud follows DSH's Cordis plugin model instead of forcing both harnesses through one runtime adapter.
+This is a separate project from Pi Cloud. Pi Cloud remains the Pi-based reference implementation; DSH Cloud follows DSH's Cordis plugin model instead of forcing both harnesses through one runtime adapter.
 
 ## Current implementation
 
 The runnable cloud slice provides:
 
 - the official DSH Web profile and frontend;
-- an append-only PostgreSQL implementation of DSH's native `SessionPersistence` contract;
-- bounded event batching through DSH's upstream persistence coordinator;
-- lossless packing of adjacent token deltas into ranged PostgreSQL records while preserving DSH's logical event sequence;
+- a PostgreSQL implementation of DSH's native `SessionPersistence` contract with one compressed immutable segment per settled Turn;
+- a bounded hot tail and transactional Outbox for unfinished native DSH events;
+- Kafka `acks=all` event publication and a rebuildable Valkey live projection before browser visibility;
 - Workspace-scoped monotonic writer fencing for safe cross-Worker handoff;
 - a Cloud Web launcher that applies the cloud profile without modifying a user's normal DSH home;
 - remote implementations of DSH's native filesystem, subprocess, terminal, and sandbox services;
@@ -20,7 +20,7 @@ The runnable cloud slice provides:
 - public registration/login with tenant-filtered Session and Workspace APIs;
 - a PostgreSQL transactional Run queue with idempotent admission, per-Workspace serialization, fair claims, leases, fencing, cancellation, and crash reconciliation;
 - a horizontally scalable pool of short-lived DSH Agent runs; `LISTEN/NOTIFY` is only a latency hint and polling preserves correctness;
-- PostgreSQL durability barriers before live Session events are forwarded to a browser;
+- projection watermarks that prevent live Session events from reaching a browser before Kafka and Valkey acknowledge them;
 - one stable Cube Volume per tenant Workspace, reattached to replacement KVMs.
 
 The production profile disables DSH's local filesystem and subprocess providers. There is no Docker, `runc`, or local-process compatibility fallback: user-generated effects can only enter the execution world through the authenticated Cube path.
@@ -33,7 +33,10 @@ Browser (official DSH Web UI)
         v
 Multi-tenant Gateway
         |
-        +---- PostgreSQL auth / Run queue / Session event log
+        +---- PostgreSQL auth / Run queue / Turn segments
+        |             ^
+        |             |
+        |      Outbox -> Kafka -> Valkey live projection
         |
         +---- transactional Run claims
                     |
@@ -48,19 +51,21 @@ Multi-tenant Gateway
              CubeSandbox KVM
 ```
 
-The Session log is the model-context authority. PostgreSQL stores DSH's native events rather than a separately reconstructed `messages[]` array, so compaction, steering, tool outcomes, request headers, and interrupted-turn recovery keep upstream semantics. Temporal is intentionally not part of this design: the current AgentDock architecture and DSH Cloud both use PostgreSQL as the sole product-state and Run-queue authority.
+The Session log is the model-context authority. PostgreSQL stores DSH's native events rather than a separately reconstructed `messages[]` array, so compaction, steering, tool outcomes, request headers, and interrupted-turn recovery keep upstream semantics. Temporal is intentionally not part of this design: Pi Cloud and DSH Cloud both use PostgreSQL as the sole product-state and Run-queue authority.
 
 ## Local development
 
-Requirements: Node.js 22.19+ or 24+, pnpm 11, and PostgreSQL.
+Requirements: Node.js 22.19+ or 24+, pnpm 11, PostgreSQL, Kafka, and Valkey.
 
 ```bash
 cp .env.example .env
 pnpm install
 pnpm build
+docker compose -f deploy/dev/compose.yaml up -d --wait postgres kafka valkey
 set -a; . ./.env; set +a
 pnpm start:manager
 # in separate terminals:
+pnpm start:relay
 pnpm start
 pnpm start:gateway
 ```
@@ -80,7 +85,7 @@ the released DSH Web profile through the Cloud overlay before fetching the
 official frontend. CI runs both gates on every push.
 
 See [the architecture document](docs/architecture.md) for ownership and failure boundaries.
-The [AgentDock alignment review](docs/agentdock-alignment.md) records which
+The [Pi Cloud alignment review](docs/pi-cloud-alignment.md) records which
 cloud invariants are shared and why DSH-specific event persistence and Worker
 transport affinity remain different.
 The latest automated, real-model, and Cube KVM results are
@@ -89,7 +94,10 @@ recorded in the [production acceptance report](docs/reports/production-acceptanc
 ## One-host deployment
 
 The one-host profile requires Docker Compose plus an existing CubeSandbox
-control/compute cluster and a Cube Volume driver. Build and publish the
+control/compute cluster and a Cube Volume driver. Set
+`DSH_CLOUD_CUBE_CONTROL_NETWORK` to the external Docker network that exposes
+the trusted Cube API relay named by `DSH_CLOUD_CUBE_API_URL`; the Manager joins
+that network, while Workers and the Gateway do not. Build and publish the
 credential-free execution image, register it as described below, then run:
 
 ```bash
@@ -100,7 +108,7 @@ credential-free execution image, register it as described below, then run:
 
 The first invocation creates a mode-0600 environment file and generates the
 platform-owned secrets. The second validates the configuration, builds the
-Gateway/Worker/Manager images, starts PostgreSQL and two Workers, and waits for
+Gateway/Worker/Manager/Relay images, starts PostgreSQL, Kafka, Valkey and two Workers, and waits for
 the health gates. `./install.sh check` renders Compose without changing the
 deployment; `./install.sh down` stops services while retaining PostgreSQL and
 Worker profile volumes.
@@ -113,6 +121,10 @@ Important lifecycle values are deliberately shared across components:
 | `DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS` | 540 s | Maximum graceful Run drain before Worker abort; must remain below the orchestrator termination grace period. |
 | `DSH_CLOUD_SANDBOX_IDLE_TTL_MS` | 30 min | Warm KVM lifetime after its last Tool operation; Workspace bytes remain in the Cube Volume. |
 | `DSH_CLOUD_WORKER_SLOTS` | 4 | Concurrent active Agent Runs admitted by one Worker process. |
+| `DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS` | 24 h | Retention of the rebuildable Valkey live projection; settled history remains in PostgreSQL Turn segments. |
+| `DSH_CLOUD_KAFKA_EVENT_RETENTION_MS` | 48 h | Durable live-publication horizon; it must exceed the Valkey replay window. Configure existing external topics to the same value. |
+| `DSH_CLOUD_RELAY_LEASE_SECONDS` | 60 s | Outbox publication ownership; it exceeds one 30-second Kafka delivery attempt plus Valkey/commit time. |
+| `DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS` | 90 s | Gateway visibility deadline; permits one bounded Kafka retry before failing closed. |
 
 Workers heartbeat every five seconds. The default 20-second Run lease therefore
 tolerates transient database delays while still fencing an abandoned Attempt
@@ -121,8 +133,8 @@ invalid deployment.
 
 ## Kubernetes deployment
 
-The Helm chart deploys independent Gateway, Worker and Sandbox Manager replica
-sets. PostgreSQL and Cube remain external authorities. KEDA scales only the
+The Helm chart deploys independent Gateway, Worker, Session Event Relay and Sandbox Manager replica
+sets. PostgreSQL, Kafka, Valkey and Cube remain external authorities. KEDA scales only the
 Worker Deployment from the PostgreSQL ready-Run backlog; it is not a second
 scheduler and losing KEDA does not lose queued work.
 
@@ -133,7 +145,7 @@ helm upgrade --install dsh-cloud deploy/helm/dsh-cloud \
   --set sandbox.cube.templateId=your-template
 ```
 
-Create the PostgreSQL, model and Cube Secrets named in `values.yaml` before
+Create the PostgreSQL, model and Cube Secrets named in `values.yaml`, and configure the external Kafka/Valkey endpoints, before
 installation. When autoscaling is enabled, install KEDA first. The chart adds
 PodDisruptionBudgets, non-root/read-only security contexts, default-deny
 NetworkPolicies, Worker drain grace, health probes and Prometheus scrape

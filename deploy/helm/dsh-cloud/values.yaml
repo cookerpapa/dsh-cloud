@@ -8,6 +8,9 @@ images:
   manager:
     repository: ghcr.io/example/dsh-cloud-manager
     tag: latest
+  relay:
+    repository: ghcr.io/example/dsh-cloud-session-event-relay
+    tag: latest
   pullPolicy: IfNotPresent
 
 namespace: default
@@ -17,6 +20,7 @@ run:
 gateway:
   replicas: 2
   secureCookies: true
+  eventProjectionTimeoutMs: 90000
   service:
     type: ClusterIP
     port: 8080
@@ -50,6 +54,24 @@ manager:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: "1", memory: 512Mi }
+relay:
+  replicas: 2
+  leaseSeconds: 60
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+kafka:
+  brokers: "kafka.kafka.svc:9092"
+  port: 9092
+  topic: dsh-cloud-session-events-v1
+  partitions: 48
+  replicationFactor: 3
+  eventRetentionMs: "172800000"
+valkey:
+  url: "redis://valkey.valkey.svc:6379"
+  port: 6379
+  liveEventRetentionSeconds: 86400
 
 postgres:
   secretName: dsh-cloud-postgres

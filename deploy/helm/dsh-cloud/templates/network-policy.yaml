@@ -49,4 +49,19 @@ spec:
   ingress:
     - ports: [{ protocol: TCP, port: 3090 }]
   egress: [{ ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }, { protocol: TCP, port: {{ .Values.sandbox.cube.apiPort }} }, { protocol: TCP, port: {{ .Values.sandbox.cube.proxyPort }} }, { protocol: TCP, port: 443 }, { protocol: TCP, port: 5432 }] }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ .Release.Name }}-session-event-relay }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: session-event-relay } }
+  policyTypes: [Ingress,Egress]
+  ingress: [{ ports: [{ protocol: TCP, port: 3091 }] }]
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: {{ .Values.kafka.port }} }
+        - { protocol: TCP, port: {{ .Values.valkey.port }} }
 {{- end }}

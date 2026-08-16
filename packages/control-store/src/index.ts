@@ -161,7 +161,7 @@ export class ControlStore {
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.runs (
         namespace text NOT NULL, id uuid NOT NULL, tenant_id uuid NOT NULL, session_id text NOT NULL, workspace_id uuid NOT NULL,
         client_rpc_id text NOT NULL, idempotency_key text NOT NULL, status text NOT NULL
-          CHECK (status IN ('queued','claimed','dispatched','running','completed','failed','cancel_requested','cancelled','timed_out')),
+          CHECK (status IN ('queued','claimed','dispatching','dispatched','running','completed','failed','cancel_requested','cancelled','timed_out')),
         request_json jsonb NOT NULL, response_json jsonb, error_code text, worker_id text, current_attempt_id uuid,
         writer_fence bigint, available_at timestamptz NOT NULL DEFAULT now(),
         created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
@@ -172,9 +172,9 @@ export class ControlStore {
       CREATE INDEX IF NOT EXISTS dsh_cloud_runs_ready_queue ON ${SQL_SCHEMA}.runs(namespace,status,available_at,created_at);
       CREATE UNIQUE INDEX IF NOT EXISTS dsh_cloud_runs_rpc_id ON ${SQL_SCHEMA}.runs(namespace, client_rpc_id);
       CREATE UNIQUE INDEX IF NOT EXISTS dsh_cloud_one_active_run_per_session_v2 ON ${SQL_SCHEMA}.runs(namespace, session_id)
-        WHERE status IN ('claimed','dispatched','running','cancel_requested');
+        WHERE status IN ('claimed','dispatching','dispatched','running','cancel_requested');
       CREATE UNIQUE INDEX IF NOT EXISTS dsh_cloud_one_active_run_per_workspace_v2 ON ${SQL_SCHEMA}.runs(namespace, workspace_id)
-        WHERE status IN ('claimed','dispatched','running','cancel_requested');
+        WHERE status IN ('claimed','dispatching','dispatched','running','cancel_requested');
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.run_attempts (
         namespace text NOT NULL, id uuid NOT NULL, run_id uuid NOT NULL, worker_id text NOT NULL, writer_fence bigint NOT NULL,
         status text NOT NULL CHECK (status IN ('claimed','running','completed','failed','superseded','cancelled')),
@@ -342,9 +342,14 @@ export class ControlStore {
   }
 
   async sessionDurableThrough(sessionId: string): Promise<number> {
-    const result = await this.pool.query<{ next_seq: string }>(`SELECT next_seq::text FROM dsh_cloud.sessions WHERE namespace=$1 AND id=$2`, [this.namespace, sessionId])
-    const next = Number(result.rows[0]?.next_seq ?? '0')
-    return Number.isSafeInteger(next) && next > 0 ? next - 1 : -1
+    if (!(await this.sessionEventStoreReady())) return -1
+    const result = await this.pool.query<{ projected_through: string }>(`
+      SELECT projected_through::text
+      FROM dsh_cloud.sessions
+      WHERE namespace=$1 AND id=$2
+    `, [this.namespace, sessionId])
+    const through = Number(result.rows[0]?.projected_through ?? '-1')
+    return Number.isSafeInteger(through) && through >= -1 ? through : -1
   }
 
   async heartbeatWorker(input: { id: string; baseUrl: string; maximumRuns: number }): Promise<void> {
@@ -428,11 +433,11 @@ export class ControlStore {
           ))
           AND (SELECT count(*) FROM ${SQL_SCHEMA}.runs tenant_active
             WHERE tenant_active.namespace=run.namespace AND tenant_active.tenant_id=run.tenant_id
-              AND tenant_active.status IN ('claimed','dispatched','running','cancel_requested')) < tenant.maximum_concurrent_runs
+              AND tenant_active.status IN ('claimed','dispatching','dispatched','running','cancel_requested')) < tenant.maximum_concurrent_runs
           AND NOT EXISTS (
             SELECT 1 FROM ${SQL_SCHEMA}.runs active
             WHERE active.namespace=run.namespace AND active.workspace_id=run.workspace_id
-              AND active.status IN ('claimed','dispatched','running','cancel_requested')
+              AND active.status IN ('claimed','dispatching','dispatched','running','cancel_requested')
           )
           AND NOT EXISTS (
             SELECT 1 FROM ${SQL_SCHEMA}.runs earlier
@@ -469,24 +474,31 @@ export class ControlStore {
   }
 
   async markDispatched(runId: string, attemptId: string, response: unknown): Promise<void> {
-    const updated = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='dispatched',response_json=$4::jsonb,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='claimed'`, [this.namespace, runId, attemptId, JSON.stringify(response)])
+    const updated = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='dispatched',response_json=$4::jsonb,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='dispatching'`, [this.namespace, runId, attemptId, JSON.stringify(response)])
     if (updated.rowCount !== 1) throw Object.assign(new Error('Run lost writer ownership before dispatch commit'), { code: 'ESTALE' })
     await this.pool.query(`UPDATE ${SQL_SCHEMA}.run_attempts SET heartbeat_at=now() WHERE namespace=$1 AND id=$2 AND run_id=$3`, [this.namespace, attemptId, runId])
   }
 
+  /** Record the at-most-once boundary before the prompt can reach DSH. */
+  async markDispatching(runId: string, attemptId: string): Promise<void> {
+    const updated = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='dispatching',updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='claimed'`, [this.namespace, runId, attemptId])
+    if (updated.rowCount !== 1) throw Object.assign(new Error('Run lost writer ownership before dispatch started'), { code: 'ESTALE' })
+  }
+
   async promptPersisted(runId: string): Promise<boolean> {
+    if (!(await this.sessionEventStoreReady())) return false
     const result = await this.pool.query<{ persisted: boolean }>(`
       SELECT EXISTS(
-        SELECT 1 FROM dsh_cloud.session_events event
-        WHERE event.namespace=$1 AND event.session_id=run.session_id AND event.event->>'type'='user/message'
-          AND event.event#>>'{data,source,rpcId}'=run.client_rpc_id
+        SELECT 1 FROM dsh_cloud.session_event_markers event
+        WHERE event.namespace=$1 AND event.session_id=run.session_id
+          AND event.type='user/message' AND event.rpc_id=run.client_rpc_id
       ) AS persisted FROM ${SQL_SCHEMA}.runs run WHERE run.namespace=$1 AND run.id=$2
     `, [this.namespace, runId])
     return result.rows[0]?.persisted ?? false
   }
 
   async markRunning(runId: string, attemptId: string): Promise<void> {
-    const result = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='running',updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status IN ('claimed','dispatched')`, [this.namespace, runId, attemptId])
+    const result = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='running',updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='dispatched'`, [this.namespace, runId, attemptId])
     if (result.rowCount !== 1) throw Object.assign(new Error('Run lost writer ownership before start'), { code: 'ESTALE' })
     await this.pool.query(`UPDATE ${SQL_SCHEMA}.run_attempts SET status='running',heartbeat_at=now() WHERE namespace=$1 AND id=$2 AND run_id=$3 AND status='claimed'`, [this.namespace, attemptId, runId])
   }
@@ -509,11 +521,11 @@ export class ControlStore {
       const result = await client.query<{ worker_id: string | null }>(`
         WITH owned AS (
           SELECT worker_id FROM ${SQL_SCHEMA}.runs
-          WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status IN ('claimed','dispatched') FOR UPDATE
+          WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='claimed' FOR UPDATE
         ), updated AS (
           UPDATE ${SQL_SCHEMA}.runs SET status='queued',worker_id=NULL,current_attempt_id=NULL,response_json=NULL,
             available_at=now()+make_interval(secs=>$4::double precision/1000),updated_at=now()
-          WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status IN ('claimed','dispatched') RETURNING 1
+          WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='claimed' RETURNING 1
         ) SELECT worker_id FROM owned WHERE EXISTS(SELECT 1 FROM updated)
       `, [this.namespace, runId, attemptId, Math.max(0, delayMs)])
       const workerId = result.rows[0]?.worker_id
@@ -531,16 +543,16 @@ export class ControlStore {
   }
 
   async turnOutcome(runId: string): Promise<RunTurnOutcome | undefined> {
+    if (!(await this.sessionEventStoreReady())) return undefined
     const result = await this.pool.query<{ reason: unknown }>(`
-      SELECT terminal.event#>'{data,reason}' AS reason
+      SELECT terminal.reason
       FROM ${SQL_SCHEMA}.runs run
-      JOIN dsh_cloud.session_events terminal
+      JOIN dsh_cloud.session_event_markers terminal
         ON terminal.namespace=run.namespace AND terminal.session_id=run.session_id
-      WHERE run.namespace=$1 AND run.id=$2 AND terminal.event->>'type'='turn/end'
-        AND terminal.seq > COALESCE((SELECT MIN(prompt.seq) FROM dsh_cloud.session_events prompt
+      WHERE run.namespace=$1 AND run.id=$2 AND terminal.type='turn/end'
+        AND terminal.seq > COALESCE((SELECT MIN(prompt.seq) FROM dsh_cloud.session_event_markers prompt
           WHERE prompt.namespace=run.namespace AND prompt.session_id=run.session_id
-            AND prompt.event->>'type'='user/message'
-            AND prompt.event#>>'{data,source,rpcId}'=run.client_rpc_id), 9223372036854775807)
+            AND prompt.type='user/message' AND prompt.rpc_id=run.client_rpc_id), 9223372036854775807)
       ORDER BY terminal.seq LIMIT 1
     `, [this.namespace, runId])
     const reason = result.rows[0]?.reason
@@ -562,7 +574,7 @@ export class ControlStore {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const updated = await client.query<{ worker_id: string | null; workspace_id: string; session_id: string; writer_fence: string }>(`UPDATE ${SQL_SCHEMA}.runs SET status=$4,error_code=$5,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status IN ('claimed','dispatched','running','cancel_requested') RETURNING worker_id,workspace_id,session_id,writer_fence::text`, [this.namespace, runId, attemptId, status, errorCode ?? null])
+      const updated = await client.query<{ worker_id: string | null; workspace_id: string; session_id: string; writer_fence: string }>(`UPDATE ${SQL_SCHEMA}.runs SET status=$4,error_code=$5,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status IN ('claimed','dispatching','dispatched','running','cancel_requested') RETURNING worker_id,workspace_id,session_id,writer_fence::text`, [this.namespace, runId, attemptId, status, errorCode ?? null])
       if (updated.rows[0] === undefined) {
         const existing = await client.query<{ status: string; current_attempt_id: string | null }>(`
           SELECT status,current_attempt_id::text FROM ${SQL_SCHEMA}.runs
@@ -598,7 +610,7 @@ export class ControlStore {
   }
 
   async requestCancellation(tenantId: string, runId: string): Promise<boolean> {
-    const result = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancel_requested' END,updated_at=now() WHERE namespace=$1 AND tenant_id=$2 AND id=$3 AND status IN ('queued','claimed','dispatched','running')`, [this.namespace, tenantId, runId])
+    const result = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancel_requested' END,updated_at=now() WHERE namespace=$1 AND tenant_id=$2 AND id=$3 AND status IN ('queued','claimed','dispatching','dispatched','running')`, [this.namespace, tenantId, runId])
     await this.pool.query(`SELECT pg_notify('dsh_cloud_run_queue',$1)`, [runId])
     return result.rowCount === 1
   }
@@ -606,7 +618,7 @@ export class ControlStore {
   async requestSessionCancellation(tenantId: string, sessionId: string): Promise<boolean> {
     const result = await this.pool.query<{ id: string }>(`
       UPDATE ${SQL_SCHEMA}.runs SET status=CASE WHEN status='queued' THEN 'cancelled' ELSE 'cancel_requested' END,updated_at=now()
-      WHERE namespace=$1 AND tenant_id=$2 AND session_id=$3 AND status IN ('queued','claimed','dispatched','running') RETURNING id
+      WHERE namespace=$1 AND tenant_id=$2 AND session_id=$3 AND status IN ('queued','claimed','dispatching','dispatched','running') RETURNING id
     `, [this.namespace, tenantId, sessionId])
     for (const row of result.rows) await this.pool.query(`SELECT pg_notify('dsh_cloud_run_queue',$1)`, [row.id])
     return result.rowCount !== null && result.rowCount > 0
@@ -634,7 +646,7 @@ export class ControlStore {
       if (workspaceRow === undefined) throw Object.assign(new Error('Workspace is unavailable'), { code: 'ENOENT' })
       const active = await client.query<{ id: string; session_id: string; current_attempt_id: string; writer_fence: string }>(`
         SELECT id,session_id,current_attempt_id,writer_fence::text FROM ${SQL_SCHEMA}.runs
-        WHERE namespace=$1 AND workspace_id=$2 AND status IN ('claimed','dispatched','running','cancel_requested')
+        WHERE namespace=$1 AND workspace_id=$2 AND status IN ('claimed','dispatching','dispatched','running','cancel_requested')
         FOR UPDATE
       `, [this.namespace, row.workspace_id])
       const owner = active.rows[0]
@@ -661,7 +673,7 @@ export class ControlStore {
   }
 
   async authorityForRpcId(rpcId: string): Promise<{ tenantId: string; workspaceId: string; sessionId: string; runId: string; attemptId: string; writerFence: number } | undefined> {
-    const result = await this.pool.query<{ tenant_id: string; workspace_id: string; session_id: string; id: string; current_attempt_id: string; writer_fence: string }>(`SELECT tenant_id,workspace_id,session_id,id,current_attempt_id,writer_fence::text FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND client_rpc_id=$2 AND status IN ('claimed','dispatched','running') ORDER BY created_at DESC LIMIT 1`, [this.namespace, rpcId])
+    const result = await this.pool.query<{ tenant_id: string; workspace_id: string; session_id: string; id: string; current_attempt_id: string; writer_fence: string }>(`SELECT tenant_id,workspace_id,session_id,id,current_attempt_id,writer_fence::text FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND client_rpc_id=$2 AND status IN ('claimed','dispatching','dispatched','running') ORDER BY created_at DESC LIMIT 1`, [this.namespace, rpcId])
     const row = result.rows[0]
     if (row !== undefined) return { tenantId: row.tenant_id, workspaceId: row.workspace_id, sessionId: row.session_id, runId: row.id, attemptId: row.current_attempt_id, writerFence: Number(row.writer_fence) }
     const command = await this.pool.query<{ tenant_id: string; workspace_id: string; session_id: string; command_id: string; run_id: string | null; attempt_id: string | null; writer_fence: string }>(`SELECT tenant_id,workspace_id,session_id,command_id,run_id,attempt_id,writer_fence::text FROM ${SQL_SCHEMA}.session_commands WHERE namespace=$1 AND rpc_id=$2 AND expires_at>now()`, [this.namespace, rpcId])
@@ -676,10 +688,17 @@ export class ControlStore {
     let failed = 0
     try {
       await client.query('BEGIN')
-      const expired = await client.query<{ run_id: string; attempt_id: string; worker_id: string; prompt_persisted: boolean }>(`
-        SELECT r.id AS run_id,a.id AS attempt_id,a.worker_id,
-          EXISTS(SELECT 1 FROM dsh_cloud.session_events e WHERE e.namespace=r.namespace AND e.session_id=r.session_id
-            AND e.event->>'type'='user/message' AND e.event#>>'{data,source,rpcId}'=r.client_rpc_id) AS prompt_persisted
+      const eventStore = await client.query<{ ready: boolean }>(`
+        SELECT to_regclass('dsh_cloud.session_event_markers') IS NOT NULL AS ready
+      `)
+      const promptExpression = eventStore.rows[0]?.ready === true
+        ? `EXISTS(SELECT 1 FROM dsh_cloud.session_event_markers e
+            WHERE e.namespace=r.namespace AND e.session_id=r.session_id
+              AND e.type='user/message' AND e.rpc_id=r.client_rpc_id)`
+        : 'false'
+      const expired = await client.query<{ run_id: string; attempt_id: string; worker_id: string; run_status: string; prompt_persisted: boolean }>(`
+        SELECT r.id AS run_id,a.id AS attempt_id,a.worker_id,r.status AS run_status,
+          ${promptExpression} AS prompt_persisted
         FROM ${SQL_SCHEMA}.run_attempts a JOIN ${SQL_SCHEMA}.runs r
           ON r.namespace=a.namespace AND r.id=a.run_id AND r.current_attempt_id=a.id
         WHERE a.namespace=$1 AND a.status IN ('claimed','running')
@@ -687,8 +706,9 @@ export class ControlStore {
         FOR UPDATE OF a,r SKIP LOCKED
       `, [this.namespace, leaseSeconds])
       for (const row of expired.rows) {
-        if (row.prompt_persisted) {
-          await client.query(`UPDATE ${SQL_SCHEMA}.runs SET status='failed',error_code='worker_lease_expired',updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3`, [this.namespace, row.run_id, row.attempt_id])
+        const dispatchMayHaveStarted = row.run_status !== 'claimed'
+        if (row.prompt_persisted || dispatchMayHaveStarted) {
+          await client.query(`UPDATE ${SQL_SCHEMA}.runs SET status='failed',error_code=$4,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3`, [this.namespace, row.run_id, row.attempt_id, row.prompt_persisted ? 'worker_lease_expired' : 'prompt_dispatch_unknown'])
           await client.query(`
             UPDATE ${SQL_SCHEMA}.workspaces workspace
                SET revision=revision+1,dirty_fence=0,updated_at=now()
@@ -702,7 +722,7 @@ export class ControlStore {
           await client.query(`UPDATE ${SQL_SCHEMA}.runs SET status='queued',worker_id=NULL,current_attempt_id=NULL,response_json=NULL,available_at=now(),updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3`, [this.namespace, row.run_id, row.attempt_id])
           requeued++
         }
-        await client.query(`UPDATE ${SQL_SCHEMA}.run_attempts SET status='superseded',finished_at=now() WHERE namespace=$1 AND id=$2`, [this.namespace, row.attempt_id])
+        await client.query(`UPDATE ${SQL_SCHEMA}.run_attempts SET status=$3,finished_at=now() WHERE namespace=$1 AND id=$2`, [this.namespace, row.attempt_id, row.prompt_persisted || dispatchMayHaveStarted ? 'failed' : 'superseded'])
         await client.query(`UPDATE ${SQL_SCHEMA}.workers SET active_runs=GREATEST(0,active_runs-1) WHERE namespace=$1 AND id=$2`, [this.namespace, row.worker_id])
       }
       if (requeued > 0) await client.query(`SELECT pg_notify('dsh_cloud_run_queue','reconcile')`)
@@ -715,12 +735,19 @@ export class ControlStore {
     const result = await this.pool.query<{ queued: string; active: string; failed: string; workers: string; tenants: string }>(`
       SELECT
         (SELECT count(*) FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND status='queued')::text AS queued,
-        (SELECT count(*) FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND status IN ('claimed','dispatched','running','cancel_requested'))::text AS active,
+        (SELECT count(*) FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND status IN ('claimed','dispatching','dispatched','running','cancel_requested'))::text AS active,
         (SELECT count(*) FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND status='failed')::text AS failed,
         (SELECT count(*) FROM ${SQL_SCHEMA}.workers WHERE namespace=$1 AND NOT draining AND heartbeat_at>now()-interval '15 seconds')::text AS workers,
         (SELECT count(*) FROM ${SQL_SCHEMA}.tenants WHERE namespace=$1)::text AS tenants
     `, [this.namespace])
     const row = result.rows[0]
     return { queuedRuns:Number(row?.queued??0),activeRuns:Number(row?.active??0),failedRuns:Number(row?.failed??0),healthyWorkers:Number(row?.workers??0),registeredTenants:Number(row?.tenants??0) }
+  }
+
+  private async sessionEventStoreReady(): Promise<boolean> {
+    const result = await this.pool.query<{ ready: boolean }>(`
+      SELECT to_regclass('dsh_cloud.session_event_markers') IS NOT NULL AS ready
+    `)
+    return result.rows[0]?.ready === true
   }
 }

@@ -3,6 +3,7 @@ packages:
   - packages/*
 
 allowBuilds:
+  '@confluentinc/kafka-javascript': true
   '@deepseek-ai/dsh-subprocess-local': true
   '@google/genai': false
   esbuild: true

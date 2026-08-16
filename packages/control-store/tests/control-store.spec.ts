@@ -14,6 +14,28 @@ enabled('PostgreSQL control authority', () => {
   let workspaceId = ''
 
   beforeAll(async () => {
+    await pool.query(`
+      CREATE SCHEMA IF NOT EXISTS dsh_cloud;
+      CREATE TABLE IF NOT EXISTS dsh_cloud.schema_state (
+        singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), version integer NOT NULL
+      );
+      INSERT INTO dsh_cloud.schema_state(singleton,version) VALUES(true,3)
+        ON CONFLICT(singleton) DO NOTHING;
+      CREATE TABLE IF NOT EXISTS dsh_cloud.persistence_state(namespace text PRIMARY KEY,store_id uuid NOT NULL);
+      CREATE TABLE IF NOT EXISTS dsh_cloud.sessions (
+        namespace text NOT NULL REFERENCES dsh_cloud.persistence_state(namespace),id text NOT NULL,header jsonb NOT NULL,
+        incarnation uuid NOT NULL,revision bigint NOT NULL CHECK(revision>=0),next_seq bigint NOT NULL CHECK(next_seq>=0),
+        sealed_through bigint NOT NULL DEFAULT -1 CHECK(sealed_through>=-1),
+        projected_through bigint NOT NULL DEFAULT -1 CHECK(projected_through>=-1),
+        writer_fence bigint NOT NULL CHECK(writer_fence>=0),writer_attempt_id text,PRIMARY KEY(namespace,id)
+      );
+      CREATE TABLE IF NOT EXISTS dsh_cloud.session_event_markers (
+        namespace text NOT NULL,session_id text NOT NULL,seq bigint NOT NULL CHECK(seq>=0),
+        type text NOT NULL CHECK(type IN ('user/message','turn/end')),rpc_id text,reason jsonb,
+        PRIMARY KEY(namespace,session_id,seq),
+        FOREIGN KEY(namespace,session_id) REFERENCES dsh_cloud.sessions(namespace,id) ON DELETE CASCADE
+      );
+    `)
     await store.initialize()
     const principal = await store.register('Tenant A', 'owner@example.test', 'correct horse battery staple')
     tenantId = principal.tenantId
@@ -142,6 +164,29 @@ enabled('PostgreSQL control authority', () => {
     }
   })
 
+  test('does not replay a prompt after crossing the dispatch boundary', async () => {
+    const sessionId = randomUUID()
+    await store.registerSession({ sessionId, tenantId, workspaceId, preferredWorkerId: 'worker-a' })
+    const rpcId = randomUUID()
+    const admitted = await store.enqueueRun({
+      tenantId,
+      sessionId,
+      clientRpcId: rpcId,
+      idempotencyKey: `dispatching-expiry-${rpcId}`,
+      request: { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } },
+    })
+    const claimed = await store.claimNext('worker-a')
+    expect(claimed.kind).toBe('claimed')
+    if (claimed.kind !== 'claimed') return
+    await store.markDispatching(claimed.run.runId, claimed.run.attemptId)
+    await pool.query(`UPDATE dsh_cloud_control.run_attempts SET heartbeat_at=now()-interval '1 minute' WHERE namespace=$1 AND id=$2`, [namespace, claimed.run.attemptId])
+
+    expect(await store.reconcileExpiredAttempts(20)).toEqual({ requeued: 0, failed: 1 })
+    expect(await store.runResponse(admitted.runId)).toMatchObject({ status: 'failed' })
+    const result = await pool.query<{ error_code: string }>(`SELECT error_code FROM dsh_cloud_control.runs WHERE namespace=$1 AND id=$2`, [namespace, admitted.runId])
+    expect(result.rows[0]?.error_code).toBe('prompt_dispatch_unknown')
+  })
+
   test('settles a dirty Workspace when a post-prompt Worker lease expires', async () => {
     const sessionId = randomUUID()
     const expiredWorkspace = (await store.createWorkspace(tenantId, `Expired-${sessionId}`)).id
@@ -163,9 +208,9 @@ enabled('PostgreSQL control authority', () => {
       VALUES($1,$2,$3,$4,1,1,$5,$6)
     `, [namespace, sessionId, JSON.stringify({ version: 3, id: sessionId, createdAt: Date.now(), cwd: '/workspace' }), randomUUID(), claimed.run.writerFence, claimed.run.attemptId])
     await pool.query(`
-      INSERT INTO dsh_cloud.session_events(namespace,session_id,seq,seq_end,event)
-      VALUES($1,$2,0,0,$3)
-    `, [namespace, sessionId, JSON.stringify({ type: 'user/message', seq: 0, time: Date.now(), data: { source: { kind: 'user', rpcId } } })])
+      INSERT INTO dsh_cloud.session_event_markers(namespace,session_id,seq,type,rpc_id)
+      VALUES($1,$2,0,'user/message',$3)
+    `, [namespace, sessionId, rpcId])
     await pool.query(`UPDATE dsh_cloud_control.workspaces SET dirty_fence=$3 WHERE namespace=$1 AND id=$2`, [namespace, expiredWorkspace, claimed.run.writerFence])
     await pool.query(`UPDATE dsh_cloud_control.run_attempts SET heartbeat_at=now()-interval '1 minute' WHERE namespace=$1 AND id=$2`, [namespace, claimed.run.attemptId])
 

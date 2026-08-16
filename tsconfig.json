@@ -13,7 +13,8 @@
     { "path": "./packages/sandbox-remote" },
     { "path": "./packages/sandbox-manager" },
     { "path": "./packages/session-persistence-postgres" },
-    { "path": "./apps/cloud-web" }
-    ,{ "path": "./apps/gateway" }
+    { "path": "./apps/cloud-web" },
+    { "path": "./apps/gateway" },
+    { "path": "./apps/session-event-relay" }
   ]
 }

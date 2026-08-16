@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
-import { setTimeout as delay } from 'node:timers/promises'
-import { Pool } from 'pg'
-import WebSocket, { WebSocketServer } from 'ws'
+import { Pool, type PoolClient } from 'pg'
+import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import { ControlStore, type Principal, type WorkerRecord } from '@dsh-cloud/control-store'
 import { loginPage } from './login.js'
 
@@ -28,6 +27,7 @@ interface GatewayOptions {
   namespace: string
   publicOrigin?: string
   secureCookies: boolean
+  eventProjectionTimeoutMs?: number
   sandboxManager?: { url: string; token: string }
 }
 
@@ -81,17 +81,40 @@ export class CloudGateway {
   readonly store: ControlStore
   private readonly server: Server
   private readonly sockets = new WebSocketServer({ noServer: true })
+  private projectionClient: PoolClient | undefined
+  private readonly projectionWaiters = new Map<string, Set<() => void>>()
 
   constructor(private readonly options: GatewayOptions) {
+    if(options.eventProjectionTimeoutMs!==undefined&&(!Number.isSafeInteger(options.eventProjectionTimeoutMs)||options.eventProjectionTimeoutMs<1_000||options.eventProjectionTimeoutMs>300_000))throw new TypeError('eventProjectionTimeoutMs is invalid')
     this.store=new ControlStore(options.pool,options.namespace)
     this.server=createServer((request,response)=>void this.handle(request,response).catch(error=>this.fail(response,error)))
     this.server.on('upgrade',(request,socket,head)=>void this.upgrade(request,socket,head))
   }
 
-  async initialize(): Promise<void>{await this.store.initialize()}
+  async initialize(): Promise<void>{
+    await this.store.initialize()
+    this.projectionClient=await this.options.pool.connect()
+    this.projectionClient.on('error',()=>{
+      const failed=this.projectionClient;this.projectionClient=undefined;failed?.release(true)
+      for(const waiters of this.projectionWaiters.values())for(const wake of waiters)wake()
+      this.projectionWaiters.clear()
+    })
+    this.projectionClient.on('notification',message=>{
+      if(message.channel!=='dsh_cloud_session_projection'||message.payload===undefined)return
+      const waiters=this.projectionWaiters.get(message.payload);if(waiters===undefined)return
+      this.projectionWaiters.delete(message.payload);for(const wake of waiters)wake()
+    })
+    await this.projectionClient.query('LISTEN dsh_cloud_session_projection')
+  }
   listen(port:number,host:string):Promise<void>{return new Promise((resolve,reject)=>{this.server.once('error',reject);this.server.listen(port,host,()=>{this.server.off('error',reject);resolve()})})}
   address():{address:string;port:number}|undefined{const value=this.server.address();return value!==null&&typeof value==='object'?{address:value.address,port:value.port}:undefined}
-  close():Promise<void>{for(const socket of this.sockets.clients)socket.terminate();return new Promise((resolve,reject)=>this.server.close(error=>error===undefined?resolve():reject(error)))}
+  async close():Promise<void>{
+    for(const socket of this.sockets.clients)socket.terminate()
+    for(const waiters of this.projectionWaiters.values())for(const wake of waiters)wake()
+    this.projectionWaiters.clear()
+    if(this.projectionClient!==undefined){await this.projectionClient.query('UNLISTEN dsh_cloud_session_projection').catch(()=>undefined);this.projectionClient.release();this.projectionClient=undefined}
+    await new Promise<void>((resolve,reject)=>this.server.close(error=>error===undefined?resolve():reject(error)))
+  }
 
   private async principal(request:IncomingMessage):Promise<Principal|undefined>{const token=cookies(request)[AUTH_COOKIE];return token===undefined?undefined:this.store.authenticate(token)}
   private setCookie(token:string):string{return `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400${this.options.secureCookies?'; Secure':''}`}
@@ -217,21 +240,49 @@ export class CloudGateway {
       const path=new URL(request.url??'/','http://gateway').pathname;if(path!=='/api/events.mux'&&path!=='/api/events.host')throw new Error('unknown websocket')
       const worker=await this.store.routeWorker(principal.userId);if(worker===undefined)throw new Error('no worker')
       const allowed=await this.store.listSessionIds(principal.tenantId)
+      const url=new URL(worker.baseUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname=path
+      const upstream=new WebSocket(url)
+      const buffered:Array<{data:RawData;binary:boolean}>=[]
+      let bufferedBytes=0
+      let forward:((data:RawData,binary:boolean)=>void)|undefined
+      upstream.on('message',(data,binary)=>{
+        if(forward!==undefined){forward(data,binary);return}
+        bufferedBytes+=data instanceof ArrayBuffer?data.byteLength:Array.isArray(data)?data.reduce((sum,item)=>sum+item.byteLength,0):data.byteLength
+        if(buffered.length>=256||bufferedBytes>1024*1024){upstream.close(1013,'upstream startup buffer exceeded');return}
+        buffered.push({data,binary})
+      })
+      await new Promise<void>((resolve,reject)=>{
+        const timer=setTimeout(()=>reject(new Error('worker event stream did not open')),10_000)
+        const opened=()=>{clearTimeout(timer);upstream.off('error',failed);upstream.off('close',closed);resolve()}
+        const failed=(error:Error)=>{clearTimeout(timer);upstream.off('open',opened);upstream.off('close',closed);reject(error)}
+        const closed=()=>{clearTimeout(timer);upstream.off('open',opened);upstream.off('error',failed);reject(new Error('worker event stream closed during startup'))}
+        upstream.once('open',opened);upstream.once('error',failed);upstream.once('close',closed)
+      })
+      if(socket.destroyed){upstream.close();return}
       this.sockets.handleUpgrade(request,socket,head,browser=>{
-        const url=new URL(worker.baseUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname=path
-        const upstream=new WebSocket(url)
         const durableWatermark=new Map<string,number>()
         let delivery=Promise.resolve()
-        upstream.on('message',(data,isBinary)=>{delivery=delivery.then(async()=>{if(isBinary||browser.readyState!==WebSocket.OPEN)return;try{const value=JSON.parse(data.toString()) as Record<string,unknown>;const payload=value['payload'] as Record<string,unknown>|undefined;const sid=payload&&typeof payload['sessionId']==='string'?payload['sessionId']:undefined;if(sid!==undefined&&!allowed.has(sid)){if(await this.store.ownsSession(principal.tenantId,sid))allowed.add(sid);else return}const type=String(payload?.['type']??'');if(type==='host/remote-event'||type.startsWith('host/workspace-')||type==='host/archived-sessions-changed')return;if(payload?.['type']==='session/event'&&sid!==undefined){const event=payload['event'] as Record<string,unknown>|undefined;if(event===undefined||!Number.isSafeInteger(event['seq']))return;await this.waitDurable(sid,event['seq'] as number,durableWatermark)}browser.send(data)}catch{browser.close(1011,'durability barrier failed')}})})
+        forward=(data,isBinary)=>{delivery=delivery.then(async()=>{if(isBinary||browser.readyState!==WebSocket.OPEN)return;try{const value=JSON.parse(data.toString()) as Record<string,unknown>;const payload=value['payload'] as Record<string,unknown>|undefined;const sid=payload&&typeof payload['sessionId']==='string'?payload['sessionId']:undefined;if(sid!==undefined&&!allowed.has(sid)){if(await this.store.ownsSession(principal.tenantId,sid))allowed.add(sid);else return}const type=String(payload?.['type']??'');if(type==='host/remote-event'||type.startsWith('host/workspace-')||type==='host/archived-sessions-changed')return;if(payload?.['type']==='session/event'&&sid!==undefined){const event=payload['event'] as Record<string,unknown>|undefined;if(event===undefined||!Number.isSafeInteger(event['seq']))return;await this.waitDurable(sid,event['seq'] as number,durableWatermark)}browser.send(data,{binary:false})}catch{browser.close(1011,'durability barrier failed')}})}
+        for(const item of buffered)forward(item.data,item.binary)
+        buffered.length=0
         upstream.on('close',()=>browser.close());upstream.on('error',()=>browser.close(1011,'upstream unavailable'));browser.on('close',()=>upstream.close());browser.on('message',()=>browser.close(1008,'downlink only'))
       })
-    }catch{socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')}
+    }catch{if(!socket.destroyed)socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')}
   }
   private async waitDurable(sessionId:string,seq:number,watermarks:Map<string,number>):Promise<void>{
     if((watermarks.get(sessionId)??-1)>=seq)return
-    const deadline=Date.now()+10_000
-    while(Date.now()<deadline){const through=await this.store.sessionDurableThrough(sessionId);watermarks.set(sessionId,through);if(through>=seq)return;await delay(10)}
-    throw new Error('Session event did not cross the PostgreSQL durability barrier')
+    const deadline=Date.now()+(this.options.eventProjectionTimeoutMs??90_000)
+    while(Date.now()<deadline){const through=await this.store.sessionDurableThrough(sessionId);watermarks.set(sessionId,through);if(through>=seq)return;await this.waitProjectionSignal(sessionId,Math.min(100,deadline-Date.now()))}
+    throw new Error('Session event did not cross the durable live-projection barrier')
+  }
+  private waitProjectionSignal(sessionId:string,timeoutMs:number):Promise<void>{
+    if(timeoutMs<=0)return Promise.resolve()
+    return new Promise(resolve=>{
+      let waiters=this.projectionWaiters.get(sessionId);if(waiters===undefined){waiters=new Set();this.projectionWaiters.set(sessionId,waiters)}
+      let timer:NodeJS.Timeout
+      const wake=()=>{clearTimeout(timer);waiters!.delete(wake);if(waiters!.size===0)this.projectionWaiters.delete(sessionId);resolve()}
+      waiters.add(wake);timer=setTimeout(wake,timeoutMs)
+    })
   }
   private fail(response:ServerResponse,error:unknown):void{if(response.headersSent){response.destroy();return}const status=typeof error==='object'&&error!==null&&'status'in error?Number((error as {status:unknown}).status):500;json(response,status,{error:status===500?'internal gateway error':error instanceof Error?error.message:'request failed'})}
 }

@@ -1,12 +1,13 @@
 # DSH Cloud development rules
 
-DSH Cloud is a cloud distribution around the public DeepSeek Harness packages. It is not an AgentDock adapter and it does not copy or fork DSH internals without evidence that a public seam is insufficient.
+DSH Cloud is a cloud distribution around the public DeepSeek Harness packages. It is not a Pi Cloud adapter and it does not copy or fork DSH internals without evidence that a public seam is insufficient.
 
 ## Architecture rules
 
 - Prefer an upstream DSH service definition, plugin seam, profile, or bundle before introducing a parallel abstraction.
 - Keep the DSH Agent Loop, model credentials, session state, and orchestration in the trusted plane. User-generated filesystem and subprocess effects belong in an untrusted execution world.
-- PostgreSQL is the authoritative durable session store. A worker-local cache may improve latency but must never be required for correctness.
+- PostgreSQL is the authoritative DSH SessionPersistence store: unfinished hot tails and immutable settled-Turn segments must reconstruct the native log exactly. Kafka is the durable live-publication log and Valkey is a rebuildable browser projection; neither may become a second SessionStorage authority.
+- Browser-visible Session events must cross PostgreSQL append, Kafka `acks=all`, Valkey ordered projection, and the PostgreSQL projection watermark. Keep fine token chunks out of long-term relational rows by sealing each completed Turn into one native compressed segment.
 - Every mutating cloud operation is tenant/workspace scoped and must reject stale writer authority. Do not claim exactly-once execution for arbitrary shell commands.
 - Model-visible state must come from the DSH Session event log. Transport-only diagnostics do not silently enter model context.
 - The DSH Web UI remains an upstream dependency. Product changes should be implemented as client plugins or profile layers before editing upstream UI code.
@@ -19,4 +20,3 @@ DSH Cloud is a cloud distribution around the public DeepSeek Harness packages. I
 - Add an integration test for every persistence, fencing, or execution-boundary change.
 - Do not log credentials, model payload secrets, database URLs, or raw tenant artifacts.
 - Document the reason for the next milestone, not only its implementation steps.
-
