@@ -8,6 +8,8 @@ import { loginPage } from './login.js'
 
 const MAX_BODY_BYTES = 160 * 1024 * 1024
 const AUTH_COOKIE = 'dsh_cloud_session'
+const CLOUD_WORKSPACE_ROOT = '/workspaces'
+const WELCOME_PREFERENCE_KEY = 'ui-onboarding.welcomeNoticeVersion'
 const SESSION_METHODS = new Set(['session.history','session.models','session.selectModel','session.rename','session.attachment','session.updateQueue','session.cancel','session.prompt','session.fork'])
 const READ_ONLY_HOST_METHODS = new Set([
   'host.describe',
@@ -60,6 +62,15 @@ function parseEnvelope(body: Buffer): Envelope {
 }
 
 function sessionId(envelope: Envelope): string | undefined { return typeof envelope.payload['sessionId']==='string' ? envelope.payload['sessionId'] : undefined }
+
+function cloudDirectoryPath(value: unknown): string | undefined {
+  if(value===undefined)return CLOUD_WORKSPACE_ROOT
+  if(typeof value!=='string')return undefined
+  if(value===CLOUD_WORKSPACE_ROOT)return value
+  const prefix=`${CLOUD_WORKSPACE_ROOT}/`
+  const name=value.startsWith(prefix)?value.slice(prefix.length):''
+  return name!==''&&!name.includes('/')&&!name.includes('\\')&&name!=='.'&&name!=='..'?value:undefined
+}
 
 async function copyResponse(upstream: Response, response: ServerResponse, transform?: (value: unknown)=>unknown): Promise<void> {
   const headers: Record<string,string>={}
@@ -149,7 +160,16 @@ export class CloudGateway {
     }
     if(path==='/cloud/me'){if(principal===undefined){json(response,401,{error:'unauthorized'});return}json(response,200,principal);return}
     if(principal===undefined){if(request.method==='GET'){response.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});response.end(loginPage)}else json(response,401,{error:'unauthorized'});return}
-    if(path.startsWith('/api/')){await this.api(request,response,principal,path,await bytes(request));return}
+    if(path.startsWith('/api/')){
+      const body=await bytes(request)
+      try{await this.api(request,response,principal,path,body)}catch(error){
+        console.error('Cloud Gateway RPC failed:',error instanceof Error?error.message:String(error))
+        if(!response.headersSent){
+          try{rpcError(response,parseEnvelope(body),'internal','Cloud Gateway request failed',500)}catch{this.fail(response,error)}
+        }
+      }
+      return
+    }
     if(request.method!=='GET'&&request.method!=='HEAD'){json(response,405,{error:'method not allowed'});return}
     const worker=await this.store.routeWorker(principal.userId)
     if(worker===undefined){json(response,503,{error:'no healthy DSH Worker'});return}
@@ -159,10 +179,13 @@ export class CloudGateway {
   private async api(request:IncomingMessage,response:ServerResponse,principal:Principal,path:string,body:Buffer):Promise<void>{
     if(request.method!=='POST'){json(response,405,{error:'method not allowed'});return}
     const envelope=parseEnvelope(body)
-    if(path!==`/api/${envelope.method}`){rpcError(response,envelope,'invalid-request','RPC method does not match its HTTP route',400);return}
+    if(!this.sameOrigin(request)){rpcError(response,envelope,'bad-request','Request origin was rejected',403);return}
+    if(path!==`/api/${envelope.method}`){rpcError(response,envelope,'bad-request','RPC method does not match its HTTP route',400);return}
     if(envelope.method.startsWith('workspace.')){await this.workspace(response,principal,envelope);return}
+    if(envelope.method==='host.listDirectory'||envelope.method==='host.createDirectory'){this.cloudDirectory(response,envelope);return}
     const worker=await this.store.routeWorker(principal.userId)
-    if(worker===undefined){rpcError(response,envelope,'unavailable','No healthy DSH Worker is available',503);return}
+    if(worker===undefined){rpcError(response,envelope,'internal','No healthy DSH Worker is available',503);return}
+    if(envelope.method==='settings.describe'||envelope.method==='settings.mutate'){await this.cloudSettings(response,principal,worker,envelope,request);return}
     const sid=sessionId(envelope)
     if(SESSION_METHODS.has(envelope.method)&&(sid===undefined||!await this.store.ownsSession(principal.tenantId,sid))){rpcError(response,envelope,'session-not-found','Session was not found');return}
     if(envelope.method==='session.prompt'){
@@ -198,8 +221,76 @@ export class CloudGateway {
       await copyResponse(await this.fetchWorker(worker,path,request,body),response)
       return
     }
-    if(!READ_ONLY_HOST_METHODS.has(envelope.method)){rpcError(response,envelope,'forbidden','This cloud deployment does not expose that Host operation');return}
+    if(!READ_ONLY_HOST_METHODS.has(envelope.method)){
+      const code=envelope.method.startsWith('settings.')?'settings-not-exposed':envelope.method.startsWith('credentials.')?'credential-rejected':'bad-request'
+      rpcError(response,envelope,code,'This cloud deployment does not expose that Host operation');return
+    }
     await copyResponse(await this.fetchWorker(worker,path,request,body),response)
+  }
+
+  private cloudDirectory(response:ServerResponse,envelope:Envelope):void{
+    if(envelope.method==='host.listDirectory'){
+      const path=cloudDirectoryPath(envelope.payload['path'])
+      if(path===undefined){rpcError(response,envelope,'directory-unreadable','Cloud Workspace paths must be direct children of /workspaces');return}
+      const name=path===CLOUD_WORKSPACE_ROOT?'Workspaces':path.slice(CLOUD_WORKSPACE_ROOT.length+1)
+      const crumbs=[{name:'Workspaces',path:CLOUD_WORKSPACE_ROOT,hidden:false}]
+      if(path!==CLOUD_WORKSPACE_ROOT)crumbs.push({name,path,hidden:false})
+      rpc(response,envelope,{path,home:CLOUD_WORKSPACE_ROOT,crumbs,entries:[],truncated:false});return
+    }
+    const parent=cloudDirectoryPath(envelope.payload['path'])
+    const name=typeof envelope.payload['name']==='string'?envelope.payload['name'].trim():''
+    if(parent!==CLOUD_WORKSPACE_ROOT||name===''||name==='.'||name==='..'||name.includes('/')||name.includes('\\')||name.length>120){
+      rpcError(response,envelope,'directory-create-failed','Choose /workspaces and enter a single Workspace name of at most 120 characters');return
+    }
+    rpc(response,envelope,{path:`${CLOUD_WORKSPACE_ROOT}/${name}`})
+  }
+
+  private async cloudSettings(response:ServerResponse,principal:Principal,worker:WorkerRecord,envelope:Envelope,request:IncomingMessage):Promise<void>{
+    if(envelope.method==='settings.mutate'){
+      const operations=envelope.payload['ops']
+      const operation=Array.isArray(operations)&&operations.length===1?operations[0] as Record<string,unknown>:undefined
+      const path=operation?.['path']
+      const version=operation?.['value']
+      const expected=envelope.payload['expectedRevision']
+      if(envelope.payload['ns']!=='ui-onboarding'||operation?.['op']!=='set'||!Array.isArray(path)||path.length!==1||path[0]!=='welcomeNoticeVersion'||typeof version!=='string'||version.length>100||!(expected===undefined||Number.isSafeInteger(expected))){
+        rpcError(response,envelope,'settings-not-exposed','Only the per-user welcome acknowledgement is writable in this cloud profile');return
+      }
+      const saved=await this.store.setUserPreference(principal.userId,WELCOME_PREFERENCE_KEY,version,expected as number|undefined)
+      if(saved===undefined){rpcError(response,envelope,'settings-conflict','Welcome acknowledgement was changed by another request');return}
+      const view=await this.welcomeSettingsView(worker,request,envelope,saved)
+      rpc(response,envelope,view);return
+    }
+    const upstream=await this.fetchSettingsDescription(worker,request,envelope)
+    const payload=await upstream.json() as Record<string,unknown>
+    const value=okValue(payload)
+    if(value===undefined||!Array.isArray(value['namespaces']))throw new Error('Worker returned an invalid settings descriptor')
+    const preference=await this.store.userPreference(principal.userId,WELCOME_PREFERENCE_KEY)
+    const view=(value['namespaces'] as Array<Record<string,unknown>>).find(item=>item['ns']==='ui-onboarding')
+    if(view!==undefined)this.applyWelcomePreference(view,preference)
+    value['writable']=false
+    json(response,upstream.status,payload)
+  }
+
+  private async welcomeSettingsView(worker:WorkerRecord,request:IncomingMessage,envelope:Envelope,preference:{value:unknown;revision:number}):Promise<Record<string,unknown>>{
+    const upstream=await this.fetchSettingsDescription(worker,request,envelope)
+    const payload=await upstream.json()
+    const value=okValue(payload)
+    const view=value!==undefined&&Array.isArray(value['namespaces'])?(value['namespaces'] as Array<Record<string,unknown>>).find(item=>item['ns']==='ui-onboarding'):undefined
+    if(view===undefined)throw new Error('Worker did not expose ui-onboarding settings')
+    this.applyWelcomePreference(view,preference)
+    return view
+  }
+
+  private fetchSettingsDescription(worker:WorkerRecord,request:IncomingMessage,envelope:Envelope):Promise<Response>{
+    const forwarded:Envelope={type:'client-request',rpcId:envelope.rpcId,method:'settings.describe',payload:{}}
+    return this.fetchWorker(worker,'/api/settings.describe',request,Buffer.from(JSON.stringify(forwarded)))
+  }
+
+  private applyWelcomePreference(view:Record<string,unknown>,preference:{value:unknown;revision:number}|undefined):void{
+    const value=typeof preference?.value==='string'?{welcomeNoticeVersion:preference.value}:{}
+    view['value']=value
+    if(preference===undefined)delete view['user'];else view['user']=value
+    view['revision']=preference?.revision??0
   }
 
   private async workspace(response:ServerResponse,principal:Principal,envelope:Envelope):Promise<void>{
@@ -217,7 +308,7 @@ export class CloudGateway {
   }
 
   private async fetchWorker(worker:WorkerRecord,path:string,request:IncomingMessage,body:Buffer):Promise<Response>{
-    const headers=new Headers();for(const [key,value] of Object.entries(request.headers)){if(value!==undefined&&!['host','cookie','connection','content-length'].includes(key))headers.set(key,Array.isArray(value)?value.join(', '):value)}
+    const headers=new Headers();for(const [key,value] of Object.entries(request.headers)){if(value!==undefined&&!['host','cookie','connection','content-length','origin'].includes(key))headers.set(key,Array.isArray(value)?value.join(', '):value)}
     return fetch(`${worker.baseUrl}${path}`,{method:request.method??'GET',headers,...(body.byteLength===0?{}:{body}),signal:AbortSignal.timeout(180_000)})
   }
   private async proxy(worker:WorkerRecord,request:IncomingMessage,response:ServerResponse,body:Buffer):Promise<void>{await copyResponse(await this.fetchWorker(worker,new URL(request.url??'/','http://gateway').pathname+new URL(request.url??'/','http://gateway').search,request,body),response)}

@@ -42,6 +42,11 @@ export interface OperationalMetrics {
   readonly registeredTenants: number
 }
 
+export interface UserPreference {
+  readonly value: unknown
+  readonly revision: number
+}
+
 export interface RunTurnOutcome {
   readonly kind: string
   readonly errorCode?: string
@@ -117,7 +122,10 @@ export class ControlStore {
       await client.query(`SELECT pg_advisory_lock(hashtextextended($1,0))`, [`${SQL_SCHEMA}:migration`])
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${SQL_SCHEMA}; CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.schema_state(singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),version integer NOT NULL)`)
       const state = await client.query<{ version: number }>(`SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton=true`)
-      if (state.rows[0]?.version === 7) return
+      if (state.rows[0]?.version === 7) {
+        await this.ensureUserPreferences(client)
+        return
+      }
       if (state.rows[0] !== undefined) throw new Error(`control schema version ${state.rows[0].version} is unsupported; reset this pre-production database`)
       await client.query(`
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.tenants (
@@ -199,10 +207,22 @@ export class ControlStore {
         WHEN (NEW.status='queued') EXECUTE FUNCTION ${SQL_SCHEMA}.notify_run_queue();
       INSERT INTO ${SQL_SCHEMA}.schema_state(singleton,version) VALUES(true,7) ON CONFLICT(singleton) DO UPDATE SET version=excluded.version;
       `)
+      await this.ensureUserPreferences(client)
     } finally {
       await client.query(`SELECT pg_advisory_unlock(hashtextextended($1,0))`, [`${SQL_SCHEMA}:migration`]).catch(() => undefined)
       client.release()
     }
+  }
+
+  private async ensureUserPreferences(client: { query(query: string): Promise<unknown> }): Promise<void> {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.user_preferences (
+        namespace text NOT NULL, user_id uuid NOT NULL, key text NOT NULL, value_json jsonb NOT NULL,
+        revision bigint NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY(namespace,user_id,key),
+        FOREIGN KEY(namespace,user_id) REFERENCES ${SQL_SCHEMA}.users(namespace,id) ON DELETE CASCADE
+      )
+    `)
   }
 
   async register(name: string, emailValue: string, password: string): Promise<Principal> {
@@ -247,6 +267,29 @@ export class ControlStore {
 
   async revokeAuthSession(token: string): Promise<void> {
     await this.pool.query(`DELETE FROM ${SQL_SCHEMA}.auth_sessions WHERE namespace=$1 AND token_hash=$2`, [this.namespace, tokenDigest(token)])
+  }
+
+  async userPreference(userId: string, key: string): Promise<UserPreference | undefined> {
+    const result = await this.pool.query<{ value_json: unknown; revision: string }>(`
+      SELECT value_json,revision::text FROM ${SQL_SCHEMA}.user_preferences
+      WHERE namespace=$1 AND user_id=$2 AND key=$3
+    `, [this.namespace, userId, key])
+    const row = result.rows[0]
+    return row === undefined ? undefined : { value: row.value_json, revision: Number(row.revision) }
+  }
+
+  async setUserPreference(userId: string, key: string, value: unknown, expectedRevision?: number): Promise<UserPreference | undefined> {
+    const result = await this.pool.query<{ value_json: unknown; revision: string }>(`
+      INSERT INTO ${SQL_SCHEMA}.user_preferences(namespace,user_id,key,value_json,revision)
+      SELECT $1,$2,$3,$4::jsonb,1
+      WHERE $5::bigint IS NULL OR $5::bigint=0
+      ON CONFLICT(namespace,user_id,key) DO UPDATE
+        SET value_json=excluded.value_json,revision=${SQL_SCHEMA}.user_preferences.revision+1,updated_at=now()
+        WHERE $5::bigint IS NULL OR ${SQL_SCHEMA}.user_preferences.revision=$5::bigint
+      RETURNING value_json,revision::text
+    `, [this.namespace, userId, key, JSON.stringify(value), expectedRevision ?? null])
+    const row = result.rows[0]
+    return row === undefined ? undefined : { value: row.value_json, revision: Number(row.revision) }
   }
 
   async createWorkspace(tenantId: string, name: string): Promise<{ id: string; name: string }> {

@@ -39,7 +39,12 @@ async function state() {
   })
   const cookie = registered.response.headers.getSetCookie()[0]?.split(';', 1)[0]
   if (!cookie) throw new Error('registration did not return an auth cookie')
-  const workspace = await rpc(cookie, 'workspace.create', { path: 'Real User Acceptance' })
+  const root = await rpc(cookie, 'host.listDirectory', {})
+  if (root.value?.path !== '/workspaces') throw new Error('cloud Workspace directory root was not available')
+  const directoryName = `real-user-${randomUUID().slice(0, 8)}`
+  const directory = await rpc(cookie, 'host.createDirectory', { path: root.value.path, name: directoryName })
+  if (directory.value?.path !== `/workspaces/${directoryName}`) throw new Error('cloud Workspace directory was not created')
+  const workspace = await rpc(cookie, 'workspace.create', { path: directory.value.path })
   const workspaceId = workspace.value?.workspace?.workspaceId
   if (typeof workspaceId !== 'string') throw new Error('workspace.create did not return an id')
   const session = await rpc(cookie, 'session.create', { workspaceId })

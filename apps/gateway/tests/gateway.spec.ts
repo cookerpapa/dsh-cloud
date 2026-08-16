@@ -15,16 +15,19 @@ enabled('multi-tenant Cloud Gateway',()=>{
   const namespace=`gateway-${randomUUID()}`
   const pool=new Pool({connectionString,max:10})
   let fake:Server,fakeSockets:WebSocketServer,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
+  const workerOrigins=new Map<string,string|undefined>()
 
   beforeAll(async()=>{
     fake=createServer(async(request,response)=>{
       if(request.url==='/'&&request.method==='GET'){response.writeHead(200,{'content-type':'text/html'});response.end('<main>official dsh ui</main>');return}
       if(request.url==='/v1/workspaces/destroy'&&request.method==='POST'){response.writeHead(200,{'content-type':'application/json'});response.end('{"deleted":true}');return}
       const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));const envelope=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {rpcId:string;method:string;payload:Record<string,unknown>}
+      workerOrigins.set(envelope.rpcId,request.headers.origin)
       let value:unknown={}
       if(envelope.method==='session.create')value={sessionId:envelope.payload['sessionId']}
       if(envelope.method==='session.list')value={items:[{sessionId:ownedSession},{sessionId:'foreign-session'}]}
       if(envelope.method==='session.history')value={events:[],hasMore:false}
+      if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[{ns:'ui-onboarding',schema:{},value:{},applies:'live',secrets:[],revision:0}]}
       const body=JSON.stringify({type:'server-response',rpcId:envelope.rpcId,result:{ok:true,value}});response.writeHead(200,{'content-type':'application/json','content-length':String(Buffer.byteLength(body))});response.end(body)
     })
     fakeSockets=new WebSocketServer({noServer:true})
@@ -62,6 +65,29 @@ enabled('multi-tenant Cloud Gateway',()=>{
     expect(list.result.value.items.map(item=>item.sessionId)).toEqual([ownedSession])
   })
 
+  test('terminates browser Origin trust at the Gateway before invoking a Worker',async()=>{
+    const rpcId=randomUUID()
+    const created=await fetch(`${baseUrl}/api/session.create`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:baseUrl},body:JSON.stringify({type:'client-request',rpcId,method:'session.create',payload:{}})})
+    const result=await created.json() as {result:{ok:boolean;value:{sessionId:string}}}
+    expect(result.result.ok).toBe(true)
+    expect(workerOrigins.get(rpcId)).toBeUndefined()
+
+    const rejected=await fetch(`${baseUrl}/api/host.describe`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:'https://attacker.example'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'host.describe',payload:{}})})
+    expect(await rejected.json()).toMatchObject({result:{ok:false,error:{code:'bad-request'}}})
+  })
+
+  test('persists the loopback welcome acknowledgement per cloud user',async()=>{
+    const describe=async()=>{
+      const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.describe',payload:{}}
+      return (await (await fetch(`${baseUrl}/api/settings.describe`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:baseUrl},body:JSON.stringify(envelope)})).json()) as {result:{value:{writable:boolean;namespaces:Array<{ns:string;value:Record<string,unknown>;revision:number}>}}}
+    }
+    expect((await describe()).result.value).toMatchObject({writable:false,namespaces:[{ns:'ui-onboarding',value:{},revision:0}]})
+    const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.mutate',payload:{ns:'ui-onboarding',ops:[{op:'set',path:['welcomeNoticeVersion'],value:'acceptance-v1'}]}}
+    const saved=await fetch(`${baseUrl}/api/settings.mutate`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:baseUrl},body:JSON.stringify(envelope)})
+    expect(await saved.json()).toMatchObject({result:{ok:true,value:{ns:'ui-onboarding',value:{welcomeNoticeVersion:'acceptance-v1'},revision:1}}})
+    expect((await describe()).result.value.namespaces[0]).toMatchObject({value:{welcomeNoticeVersion:'acceptance-v1'},revision:1})
+  })
+
   test('admits prompts to PostgreSQL instead of invoking the Host directly',async()=>{
     const rpcId=randomUUID();const response=await fetch(`${baseUrl}/api/session.prompt`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId,method:'session.prompt',payload:{sessionId:ownedSession,mode:'queue',content:[{type:'text',text:'hello'}]}})})
     const value=await response.json() as {result:{value:{accepted:boolean;runId:string}}};expect(value.result.value.accepted).toBe(true)
@@ -78,6 +104,20 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const response=await fetch(`${baseUrl}/api/session.history`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.history',payload:{sessionId:ownedSession}})})
     const value=await response.json() as {result:{ok:boolean;value:{events:unknown[]}}}
     expect(value.result).toMatchObject({ok:true,value:{events:[]}})
+  })
+
+  test('serves a cloud Workspace namespace instead of exposing Worker directories',async()=>{
+    const listEnvelope={type:'client-request',rpcId:randomUUID(),method:'host.listDirectory',payload:{}}
+    const listed=await fetch(`${baseUrl}/api/host.listDirectory`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(listEnvelope)})
+    expect(await listed.json()).toMatchObject({result:{ok:true,value:{path:'/workspaces',home:'/workspaces',entries:[],truncated:false}}})
+
+    const createEnvelope={type:'client-request',rpcId:randomUUID(),method:'host.createDirectory',payload:{path:'/workspaces',name:'sorting-lab'}}
+    const created=await fetch(`${baseUrl}/api/host.createDirectory`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(createEnvelope)})
+    expect(await created.json()).toMatchObject({result:{ok:true,value:{path:'/workspaces/sorting-lab'}}})
+
+    const rejectedEnvelope={type:'client-request',rpcId:randomUUID(),method:'host.listDirectory',payload:{path:'/etc'}}
+    const rejected=await fetch(`${baseUrl}/api/host.listDirectory`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(rejectedEnvelope)})
+    expect(await rejected.json()).toMatchObject({result:{ok:false,error:{code:'directory-unreadable'}}})
   })
 
   test('opens the private Worker stream before the browser and preserves text frames',async()=>{
@@ -97,7 +137,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.update',payload:{patch:{}}}
     const response=await fetch(`${baseUrl}/api/settings.update`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(envelope)})
     const value=await response.json() as {result:{ok:boolean;error:{code:string}}}
-    expect(value.result).toMatchObject({ok:false,error:{code:'forbidden'}})
+    expect(value.result).toMatchObject({ok:false,error:{code:'settings-not-exposed'}})
   })
 
   test('does not bypass RPC policy through another HTTP method',async()=>{
