@@ -21,7 +21,7 @@
     "dev": "tsx apps/cloud-web/src/main.ts",
     "start": "node apps/cloud-web/lib/main.js",
     "test": "vitest run",
-    "test:postgres": "DSH_CLOUD_TEST_DATABASE_URL=postgresql://dsh_cloud:dsh_cloud@127.0.0.1:5438/dsh_cloud vitest run packages/session-persistence-postgres"
+    "test:integration": "DSH_CLOUD_TEST_DATABASE_URL=${DSH_CLOUD_TEST_DATABASE_URL:-postgresql://dsh_cloud:dsh_cloud@127.0.0.1:5438/dsh_cloud} vitest run packages/session-persistence-postgres apps/cloud-web"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

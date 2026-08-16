@@ -59,7 +59,12 @@ Run the verification suite with:
 
 ```bash
 pnpm check
+pnpm db:up
+pnpm test:integration
 ```
 
-See [the architecture document](docs/architecture.md) for ownership and failure boundaries.
+`test:integration` runs the Session contract against real PostgreSQL and boots
+the released DSH Web profile through the Cloud overlay before fetching the
+official frontend. CI runs both gates on every push.
 
+See [the architecture document](docs/architecture.md) for ownership and failure boundaries.
