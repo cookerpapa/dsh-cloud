@@ -94,6 +94,24 @@ Run component benchmarks separately from the end-to-end workload. Their role
 is to identify messaging or relational-storage headroom after the application
 path has been verified, not to estimate the number of concurrent Agent Loops.
 
+## Compaction baseline acceptance
+
+The deterministic SessionPersistence suite is the normal regression gate: it
+creates native Compaction events, verifies baseline-plus-suffix restoration,
+advances the baseline twice, corrupts derived bytes and proves canonical-log
+fallback. A real-model acceptance additionally verifies the summarizer and
+Worker handoff, but must not require hundreds of thousands of paid tokens just
+to cross a large production model's pressure threshold.
+
+For that bounded acceptance only, lower `thresholdRatio` and `retainRatio` in
+the selected preset inside the disposable Worker containers, run a multi-Turn
+coding Session until native `compaction/start`, `compaction/summary` and a
+successful `compaction/end` are durable, and verify the PostgreSQL runtime
+baseline. Restore the packaged defaults, restart every Worker, then run another
+Turn that must recall prior conversation facts and execute against the retained
+Workspace. Record the temporary threshold and never publish its latency as a
+default-production Compaction measurement.
+
 ## Agent-task grading principles
 
 - Use fresh Workspaces for independent tasks.

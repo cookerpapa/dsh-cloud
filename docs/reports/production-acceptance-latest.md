@@ -1,252 +1,184 @@
-# Production Acceptance — 2026-08-16
+# Production Acceptance — 2026-08-17
 
 ## Scope
 
-This acceptance exercised the current DSH Cloud source as an external user on
-one self-hosted Linux machine. The fresh deployment used the released DSH Web
-UI and Agent Loop, real DeepSeek model calls, two independently started DSH
-Workers, PostgreSQL, Kafka, Valkey, the Tool Broker, and an existing
-CubeSandbox KVM control/compute installation.
-
-It validates the current plugin boundaries, browser durability gate, native
-Session recovery and remote Tool path. It does not claim host-level high
-availability, hostile-public-SaaS isolation, or multi-region storage
-durability.
+This report covers the current `main` architecture on one self-hosted Linux
+machine. The deployment was recreated from empty PostgreSQL, Kafka and Valkey
+volumes, then exercised through the public registration, Workspace, Session,
+Run and authenticated event-stream APIs. Model responses came from DeepSeek;
+all file and process Tools ran in CubeSandbox KVMs.
 
 ```text
 Browser -> Gateway -> PostgreSQL Run queue -> DSH Worker -> DeepSeek
                                                 |
                                                 +-> Tool Broker -> Cube KVM
 
-DSH native Session events
-    -> SessionLiveLog Provider (Kafka, acks=all)
-    -> SessionLiveProjection Provider (Valkey, ordered/rebuildable)
-    -> PostgreSQL projected-through watermark
-    -> browser-visible frame
+DSH native Session event batches
+  -> Kafka (acks=all durability)
+  -> Valkey (ordered live projection)
+  -> Gateway (only after projected-through watermark)
+  -> Browser
 
-settled Turn -> one PostgreSQL native gzip segment
+settled Turn -> PostgreSQL native gzip segment
+successful Compaction -> PostgreSQL runtime baseline + suffix
 ```
 
-There is no Temporal, MinIO, S3, Session Event Relay, PostgreSQL delta-payload
-table or PostgreSQL event Outbox in this path.
+The path contains no Temporal, MinIO/S3, Session Event Relay, Worker affinity,
+PostgreSQL token-delta payload table or PostgreSQL event Outbox.
+
+This is a single-host acceptance, not a host-HA, multi-region or hostile-public-
+SaaS claim.
+
+## Real user, model and Cube journey
+
+One user registered, created a Workspace and Session, and completed the
+following Turns against the same native DSH Session:
+
+| Turn | Verification | Result |
+| --- | --- | ---: |
+| pure chat | exact marker, no Cube activation | completed, 12.1 s |
+| coding 1 | create/test insertion sort | completed, 50.4 s |
+| coding 2 | retain prior file, add/test binary search | completed, 74.0 s |
+| KVM cold recovery | delete the Cube, preserve Volume, create a new Cube and rerun both tests | completed, 21.3 s |
+
+The two coding Turns reused one Cube activation. The cold-recovery Turn ran in
+a newly created KVM while retaining both Workspace files and passing both test
+suites. Cube therefore supplies the isolated execution lifecycle; its durable
+Volume, not VM memory or process state, supplies Workspace continuity.
+
+## Native Compaction baseline and cold Worker recovery
+
+The same Session was compacted using the real DeepSeek summarizer. Because the
+selected model advertises a one-million-token context window, the automatic
+threshold was lowered only inside the acceptance containers so a bounded
+regression transcript could trigger the production code path. The deployment
+default was restored before recovery testing.
+
+The successful Compaction emitted native `compaction/start`,
+`compaction/summary` and `compaction/end` events. PostgreSQL then materialized:
+
+| Baseline measure | Result |
+| --- | ---: |
+| physical prefix represented by the baseline | 2,165 native events |
+| compressed baseline payload | 62,667 bytes |
+| physical Session position before cold recovery | 2,537 events |
+| effective history surface returned after baseline restore | 502 events |
+
+Both DSH Workers were restarted after the baseline was committed. A subsequent
+Run landed on `worker-1`, recalled that the earlier files implemented insertion
+sort and binary search, mounted the persistent Workspace, reran both tests and
+returned `FINAL_BASELINE_COLD_RESTORE_OK` in 24.3 seconds.
+
+This verifies a real model-generated checkpoint and a new Worker restore from
+the baseline plus active suffix. PostgreSQL retains the full native log for
+history/audit, but runtime preparation no longer scans or materializes the
+shadowed physical prefix.
+
+## Foreground multi-agent workflow
+
+A root Agent was explicitly asked to use DSH's `workflow` Tool to review the
+two algorithm files. It created two native child Sessions in parallel. One
+child reviewed insertion sort and the other reviewed binary search; both were
+restricted to the read-only child Tool policy.
+
+| Multi-agent measure | Result |
+| --- | ---: |
+| root terminal state | completed |
+| child Sessions | 2 |
+| child lineage | both reference the root Session |
+| workflow lifecycle | 1 run start/end, 2 child start/end pairs |
+| Workspace mutation by children | none |
+| client-visible result | `FINAL_FOREGROUND_MULTI_AGENT_OK` |
+| Run duration | 101.9 s |
+
+Continuable/background delegation remains disabled for cloud users. Current
+workflow children share the root Workspace, so parallel mutating Agents are
+not enabled until each candidate has an isolated Workspace and an explicit
+merge/selection boundary.
+
+## Concurrent real-user acceptance
+
+### Chat profile
+
+Six users started together. Every user registered, created an independent
+Workspace and Session, completed two model Turns, and recalled a unique token
+from the first Turn in the second.
+
+| Measure | Result |
+| --- | ---: |
+| users / completed / failed | 6 / 6 / 0 |
+| completed Turns | 12 |
+| wall time | 21.2 s |
+| Turn duration p50 / p95 | 6.37 s / 14.59 s |
+| durable-first assistant p50 / p95 | 4.50 s / 11.47 s |
+| browser-visible native events | 578 |
+
+### Coding profile
+
+Two users started together. Each first created and tested stable merge sort;
+the second Turn retained that file, added binary search tests and reran the
+whole program. Unique success markers had to occur in the durably gated event
+stream; final prose alone could not pass the test.
+
+| Measure | Result |
+| --- | ---: |
+| users / completed / failed | 2 / 2 / 0 |
+| completed Turns | 4 |
+| wall time | 303.1 s |
+| Turn duration p50 / p95 | 102.97 s / 200.05 s |
+| durable-first assistant p50 / p95 | 4.50 s / 10.31 s |
+| browser-visible native events | 11,153 |
+
+The long terminal latency reflects real multi-step model/Tool work and Python
+testing on this laptop's Cube compute plane. It must not be presented as a
+storage or queue throughput result.
+
+## Component throughput
+
+Disposable targets were used so the benchmark did not touch product topics or
+tables. The bounded final run used the same WSL host while the production stack
+was online.
+
+| Component | Workload | Result |
+| --- | --- | ---: |
+| Kafka | 20,000 x 1 KiB, `acks=all`, idempotent producer, gzip, 12 partitions | 14,104 records/s (13.77 MiB/s), 4 ms p50, 7 ms p95, 13 ms p99 |
+| PostgreSQL | pgbench scale 10, 8 clients/threads, 5 s read/write TPC-B-like workload | 931 TPS, 8.59 ms average, 0 failures |
+
+These numbers measure local storage/messaging headroom, not concurrent Agent
+Loop capacity. Agent capacity is bounded by model latency, Worker slots and
+Cube compute resources before either component reaches these raw rates.
 
 ## Automated verification
 
-- all TypeScript project references build with unused local/parameter checks;
-- 79 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
-  and Valkey services, alongside 31 default unit and protocol-contract checks;
-- the tests cover native Session reconstruction, fixed-window group commit,
-  segment digest verification, stale fences, ambiguous prompt dispatch,
-  cross-tenant access, Run claims, cancellation, concurrent activation,
-  retryable Workspace deletion, Tool Broker authorization, Valkey loss and
-  rebuild, WebSocket text framing and failure injection;
-- a fresh two-Worker boot validates concurrent schema initialization; the
-  migration path serializes initialization with a PostgreSQL advisory lock;
-- the current control-schema tests verify that users and Sessions contain no
-  Worker-placement column and consecutive Runs can be claimed by different
-  Workers;
-- first-Run admission waits for DSH-native Session materialization, and the
-  Cloud profile disposes settled ordinary Agent handles before cold recovery;
-- Helm lint/render, production Compose rendering, shell syntax and whitespace
-  checks pass.
+The deterministic suite covers:
 
-## Real-user model and Cube test
+- 33 default unit/protocol checks and 84 PostgreSQL/Kafka/Valkey integration
+  checks on the final source;
+- TypeScript builds, formatting and unused-symbol checks;
+- SessionPersistence upstream contract compatibility;
+- baseline/suffix reconstruction, repeated Compaction and corrupted-baseline
+  fallback;
+- Run claim, lease, cancellation, ambiguous dispatch and stale-fence behavior;
+- Kafka group commit, Valkey projection/rebuild and browser visibility gating;
+- Tool Broker authorization, cross-tenant isolation and Workspace activation;
+- root/child Session lineage, forged-child rejection and read-only workflow
+  policy;
+- production Compose rendering, Helm rendering, shell syntax and CI checks.
 
-The final source was rebuilt into a separate fresh production deployment with
-new PostgreSQL, Kafka and Valkey volumes. Both Workers became healthy before
-the user request was submitted.
-
-The real user prompt asked the Agent to create `smoke.py`, implement a function
-that returns `42`, add an assertion, and actually run `python3 smoke.py`.
-
-| Measure | Result |
-| --- | --- |
-| terminal state | completed |
-| real model | DeepSeek |
-| Tool runtime | CubeSandbox KVM |
-| client duration | 84.7 s |
-| browser-observed native events | 254 |
-| final Tool result | `smoke.py OK: 42` |
-
-The file was written inside Cube, Python executed successfully, and the final
-assistant response reported the tested result rather than merely generating
-source text.
-
-An additional two-Turn coding acceptance during the same migration exercised
-warm Cube reuse. The first Turn created and tested insertion sort; the second
-Turn read the retained file, added a deterministic 100-element test and ran it
-again. Both completed against the real model and the same Workspace activation.
-
-The no-affinity build was then exercised as one three-Turn coding Session while
-alternately removing the prior Worker from service. Turn 1 ran on Worker 2 and
-created/tested insertion sort; Turn 2 ran on Worker 1, recovered the same
-Session and Workspace, retained that file and added/tested binary search; Turn
-3 returned to Worker 2, recovered both earlier files, added a README and reran
-all tests. Every Turn completed through the real DeepSeek and Cube KVM path.
-
-| Cross-Worker Session measure | Result |
-| --- | --- |
-| Worker sequence | Worker 2 -> Worker 1 -> Worker 2 |
-| writer fences | 1 -> 2 -> 3 |
-| terminal states | 3 completed, 0 failed |
-| client durations | 67.9 s / 73.6 s / 82.9 s |
-| final native Session position | revision 51, next seq 4,222 |
-| retained Workspace result | insertion sort, binary search and README; both test suites passed |
-
-The control schema contained zero `preferred_worker_id` columns. This is a
-forced cross-process recovery result, not load balancing that happened to pick
-different Workers.
-
-A second handoff pair kept both Worker processes alive. Capacity was used only
-to force deterministic placement: Worker 1 created `handoff.txt` with a unique
-marker and completed Fence 4; Worker 2 then claimed Fence 5, directly read that
-file without recreating it, listed all prior Workspace files, and accurately
-explained from native Session history why the previous Turn had created the
-marker. The pair completed in 51.3 s and 50.7 s. The Session finished at
-revision 79 / next seq 5,097. This specifically verifies that a settled live
-Agent was disposed and later cold-resumed on another still-running Worker,
-rather than relying on process restart to clear stale memory.
-
-The final source was then rebuilt into a second isolated deployment and tested
-as six new users starting at the same time. Every user registered through the
-public API, created a new Workspace and Session, opened the authenticated event
-stream, and consumed a real DeepSeek response.
-
-| Concurrent Agent measure | Result |
-| --- | ---: |
-| new users / Workspaces / Sessions | 6 / 6 / 6 |
-| terminal results | 6 completed, 0 failed |
-| Worker placement | 3 on Worker 1, 3 on Worker 2 |
-| client duration | 14.2-17.8 s |
-| mean client duration | 15.5 s |
-| fine native events observed by clients | 2,728 |
-| durable Kafka records | 44 |
-| fine-event to durable-record ratio | 62:1 |
-
-A subsequent Turn reused one of those Sessions and correctly referred to the
-previous answer. A third Turn in that same Session reused its Workspace and
-Cube, created `algorithms.py`, implemented stable merge sort and binary search,
-and actually ran `python3 algorithms.py`; all 20 assertions passed. The final
-coding Turn completed in 101.8 seconds after 4,642 observable native events.
-
-The initial six-way *coding* load also exposed the boundary of this particular
-single-node Cube installation: four tasks completed, while two model-driven
-Tool sequences repeatedly encountered Cube HTTP 502 and were cancelled after
-the acceptance timeout. Inspection showed one physical Cube shim despite
-multiple logical activation rows. This is not reported as successful six-way
-Tool concurrency. It establishes that Worker/model concurrency is healthy,
-while this laptop's current Cube compute plane must be expanded or repaired
-before advertising concurrent KVM coding capacity.
-
-## Independent Cube API authorization
-
-DSH Cloud was given its own CubeAPI frontend, callback authorizer and randomly
-rotated API credential. Pi Cloud's API and authorizer were not modified. The
-local acceptance shares only the lower CubeMaster/compute capacity; a dedicated
-DSH Cube control/compute installation remains the recommended production
-boundary.
-
-The live policy matrix returned:
-
-| Principal and endpoint | Probe | Result |
-| --- | --- | ---: |
-| DSH credential -> DSH CubeAPI | nonexistent `dsh-*` Volume | HTTP 404 (authorized) |
-| DSH credential -> Pi CubeAPI | `dsh-*` Volume | HTTP 401 |
-| Pi credential -> DSH CubeAPI | `adw-*` Volume | HTTP 401 |
-
-A real DSH Volume completed create/read/delete/not-found with HTTP
-201/200/204/404. After that lifecycle test, a new external user created a
-Workspace and Session and asked the Agent to implement insertion sort inside
-Cube. The Run completed in 98.8 seconds after 1,085 browser-observed native
-events and actually passed seven Python tests.
-
-The DSH credential was then rotated, the authorizer and Tool Broker were
-restarted, and startup policy preflight passed. A second Turn recovered the
-same Workspace, reran the retained insertion-sort tests, added binary search
-and completed 15 tests in total. It settled in 93.4 seconds after 1,638 new
-browser-observed events. Neither Turn encountered the former shared-authorizer
-401 failure.
-
-## Tiered Session persistence
-
-The final one-Turn acceptance produced 254 browser-visible native events. The
-40 ms upstream grouping window persisted them as 18 Kafka records and 18
-Valkey stream records. At the settled boundary PostgreSQL contained:
-
-| Measure | Result |
-| --- | ---: |
-| Session schema version | 5 |
-| immutable native Turn segments | 1 |
-| active live-log location rows | 0 |
-| semantic marker rows | 3 |
-| compressed segment bytes | 23,571 |
-| Kafka grouped records | 18 |
-| Valkey grouped records | 18 |
-| legacy delta/outbox tables | 0 |
-
-PostgreSQL therefore did not retain 254 fine-grained payload rows. While a Turn
-is active it stores only opaque Provider locations, sequence ranges and
-digests. At settlement it stores one compressed native DSH segment and removes
-the active locations. The active-location table has no payload, event or
-records column.
-
-Gateway forwards a Worker event only after Kafka has durably acknowledged its
-grouped native envelope, Valkey has accepted the sequence-checked projection,
-and PostgreSQL's `projected_through` watermark covers the event. The live-log
-and projection are separate Cordis services, so Kafka and Valkey are Provider
-plugins rather than dependencies embedded in the DSH SessionPersistence
-implementation.
-
-Valkey is rebuildable: if its projection is lost during an unfinished Turn, a
-Worker reads the opaque locations recorded in PostgreSQL, loads the exact
-envelopes from the configured SessionLiveLog Provider and reconstructs the
-projection. At a completed Turn boundary, model-context recovery reads the
-compressed PostgreSQL native segment; it does not reconstruct a synthetic
-`messages[]` array.
-
-## Throughput measurements
-
-The concurrent six-user run exercised the application path, including real
-model streams and the browser durability gate. The 40 ms group-commit window
-reduced 2,728 client-visible native events to 44 `acks=all` Kafka records. All
-six streams remained incremental and completed; grouping did not turn them
-into end-of-Turn responses.
-
-Raw component headroom was measured separately so model and Cube latency did
-not distort the storage result. The benchmark used explicit temporary targets,
-which were deleted after the run and never shared tables or topics with product
-data.
-
-| Component benchmark | Result |
-| --- | --- |
-| Kafka | 100,000 x 1 KiB records; `acks=all`, idempotent producer, gzip, 12 partitions |
-| Kafka throughput | 30,543.7 records/s; 29.83 MiB/s |
-| Kafka producer latency | 6.76 ms average; 11 ms p95; 13 ms p99; 0 errors |
-| PostgreSQL | pgbench scale 10; 16 clients; 8 threads; 30 s read/write TPC-B-like workload |
-| PostgreSQL throughput | 1,163.6 transactions/s; 34,849 transactions; 0 failures |
-| PostgreSQL latency | 13.74 ms average |
-
-These numbers measure one local Kafka broker and one local PostgreSQL instance,
-not end-to-end Agent capacity. End-to-end coding concurrency is currently
-bounded first by the single-node Cube compute plane and then by model latency;
-the messaging and relational stores had substantial headroom in this test.
+Real-model and Cube tests remain explicit acceptance jobs rather than CI gates
+because they consume provider credit and require a KVM execution plane.
 
 ## Accepted limits
 
-- The one-host Compose profile has one Kafka broker and is not highly
-  available. The Helm profile assumes an externally operated replicated Kafka
-  cluster and defaults new topics to replication factor three.
-- Kafka retention defines the maximum recoverable age of an unfinished Turn;
-  the default is 30 days. Completed Turn recovery no longer depends on Kafka
-  or Valkey.
-- Cube control/compute capacity, PostgreSQL availability and persistent Volume
-  durability remain deployment responsibilities.
-- The measured local Cube installation did not sustain six concurrent coding
-  sandboxes. The report therefore makes no multi-KVM capacity claim even though
-  six concurrent non-Tool Agent Runs completed successfully.
-- Arbitrary shell execution is not advertised as exactly once. Once prompt
-  dispatch may have started, a Run is not blindly replayed after an ambiguous
-  transport failure.
-- Valkey is currently a rebuildable projection and visibility gate. Browser
-  frames travel through Gateway's shared fleet outlet over private Worker
-  downlinks; Valkey is not yet the browser replay transport.
+- The Compose profile uses one PostgreSQL, Kafka and Valkey instance. The Helm
+  profile expects externally operated replicated data services for HA.
+- Kafka retention bounds unfinished-Turn recovery. Settled Turn and Compaction
+  recovery use PostgreSQL native segments/baselines, not Valkey.
+- Cube Volume persistence restores files, not process memory, sockets or PTYs.
+- Arbitrary shell commands are not claimed to be exactly once. An ambiguous
+  mutating Tool execution is not blindly replayed.
+- The baseline contract optimizes runtime preparation; it does not delete the
+  full native event log required for history, audit and future re-projection.
+- Parallel mutating multi-agent work requires isolated candidate Workspaces and
+  a merge policy; the current supported cloud mode is foreground, read-only
+  analysis through `workflow`.
