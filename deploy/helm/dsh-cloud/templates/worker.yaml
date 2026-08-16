@@ -29,6 +29,7 @@ spec:
             - { name: DSH_CLOUD_WORKER_SLOTS, value: {{ .Values.worker.slots | quote }} }
             - { name: DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS, value: {{ .Values.worker.drainTimeoutMs | quote }} }
             - { name: DSH_CLOUD_RUN_LEASE_SECONDS, value: {{ .Values.run.leaseSeconds | quote }} }
+            - { name: DSH_CLOUD_PROMPT_PERSIST_TIMEOUT_MS, value: {{ .Values.worker.promptPersistenceTimeoutMs | quote }} }
             - { name: DSH_CLOUD_TOOL_BROKER_URL, value: http://{{ .Release.Name }}-tool-broker:3090 }
             - { name: DSH_CLOUD_TOOL_BROKER_TOKEN, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.brokerTokenKey }} } } }
             - { name: DSH_CLOUD_KAFKA_BROKERS, value: {{ .Values.kafka.brokers | quote }} }

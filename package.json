@@ -26,6 +26,7 @@
     "start:gateway": "node apps/gateway/lib/main.js",
     "start:broker": "node packages/tool-broker/lib/main.js",
     "acceptance:real-user": "node scripts/real-user-acceptance.mjs",
+    "acceptance:refresh": "node scripts/refresh-reconnect-acceptance.mjs",
     "acceptance:concurrent": "node scripts/concurrent-real-user-acceptance.mjs",
     "benchmark:components": "node scripts/component-throughput.mjs",
     "start": "node apps/cloud-web/lib/main.js",

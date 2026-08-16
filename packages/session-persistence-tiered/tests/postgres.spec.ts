@@ -209,6 +209,63 @@ integration('TieredSessionPersistence', () => {
     expect((await ctx.sessionPersistence.load(meta.id)).events).toEqual(log)
   })
 
+  it('uses the newest bound authority when a follow-up Turn inherits stale async context', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const meta = header('follow-up-stale-context')
+    await ctx.sessionPersistence.create(meta)
+    const first = authority(meta.id, 1)
+    await ctx.cloudRunContext.run(first, () =>
+      ctx.sessionPersistence.append(meta.id, completedTurn()))
+
+    const followUp = authority(meta.id, 2)
+    ;(ctx.sessionPersistence as TieredSessionPersistence).bindRunAuthority(followUp)
+    // PersistenceCoordinator work created by the previous Turn can retain
+    // fence 1 in AsyncLocalStorage.  The Session binding for fence 2 must win.
+    await ctx.cloudRunContext.run(first, () =>
+      ctx.sessionPersistence.append(meta.id, completedTurn(6, 2)))
+
+    const pool = new Pool({ connectionString: databaseUrl })
+    const stored = await pool.query<{
+      writer_fence: string
+      writer_attempt_id: string
+    }>(`
+      SELECT writer_fence::text,writer_attempt_id
+       FROM dsh_cloud.sessions
+       WHERE namespace=$1 AND id=$2
+    `, [namespace, meta.id])
+    await pool.end()
+    expect(stored.rows[0]).toEqual({
+      writer_fence: '2',
+      writer_attempt_id: String(followUp.attemptId),
+    })
+  })
+
+  it('does not let a late stale binding replace a newer Session authority', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const meta = header('monotonic-bound-authority')
+    await ctx.sessionPersistence.create(meta)
+    const current = authority(meta.id, 3)
+    const stale = authority(meta.id, 2)
+    const persistence = ctx.sessionPersistence as TieredSessionPersistence
+    persistence.bindRunAuthority(current)
+    persistence.bindRunAuthority(stale)
+    await ctx.sessionPersistence.append(meta.id, completedTurn())
+
+    const pool = new Pool({ connectionString: databaseUrl })
+    const stored = await pool.query<{ writer_fence: string; writer_attempt_id: string }>(`
+      SELECT writer_fence::text,writer_attempt_id
+        FROM dsh_cloud.sessions
+       WHERE namespace=$1 AND id=$2
+    `, [namespace, meta.id])
+    await pool.end()
+    expect(stored.rows[0]).toEqual({
+      writer_fence: '3',
+      writer_attempt_id: String(current.attemptId),
+    })
+  })
+
   it('rejects a stale Worker after a higher writer fence has committed', async () => {
     const namespace = `test-${randomUUID()}`
     const first = await backend(namespace)

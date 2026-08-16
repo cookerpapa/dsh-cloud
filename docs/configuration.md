@@ -47,6 +47,7 @@ rebuildable projection.
 | `DSH_CLOUD_WORKER_URL` | Trusted address advertised to Gateway for the current Worker. |
 | `DSH_CLOUD_WORKER_CONTROL_HOST` / `DSH_CLOUD_WORKER_CONTROL_PORT` | Private Worker Control Channel bind. |
 | `DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS` | Graceful active-Run drain deadline. |
+| `DSH_CLOUD_PROMPT_PERSIST_TIMEOUT_MS` | Maximum time an accepted prompt may wait for its durable `user/message` boundary; expiry cancels the Host operation and fails with an explicit persistence error instead of hanging as `UNKNOWN`. |
 | `DSH_CLOUD_WORKER_METRICS_PORT` | Worker Prometheus endpoint. |
 
 `DSH_CLOUD_WORKER_ENABLED=0` is an internal profile switch used when launching

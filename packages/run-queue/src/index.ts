@@ -17,6 +17,7 @@ export interface PostgresRunWorkerOptions {
   readonly pollIntervalMs?: number
   readonly maximumAttempts?: number
   readonly attemptLeaseSeconds?: number
+  readonly promptPersistenceTimeoutMs?: number
   readonly onError?: (error: unknown) => void
 }
 
@@ -32,6 +33,7 @@ export class PostgresRunWorker {
   private readonly maximumAttempts: number
   private readonly attemptLeaseSeconds: number
   private readonly heartbeatIntervalMs: number
+  private readonly promptPersistenceTimeoutMs: number
   private controller?: AbortController
   private listener?: Client
   private loop?: Promise<void>
@@ -44,6 +46,7 @@ export class PostgresRunWorker {
     this.maximumAttempts = positive(options.maximumAttempts ?? 3, 'maximumAttempts')
     this.attemptLeaseSeconds = positive(options.attemptLeaseSeconds ?? 20, 'attemptLeaseSeconds')
     this.heartbeatIntervalMs = Math.max(250, Math.min(5_000, Math.floor(this.attemptLeaseSeconds * 1_000 / 3)))
+    this.promptPersistenceTimeoutMs = positive(options.promptPersistenceTimeoutMs ?? 30_000, 'promptPersistenceTimeoutMs')
     new URL(options.baseUrl)
   }
 
@@ -129,6 +132,7 @@ export class PostgresRunWorker {
   private async execute(run: ClaimedRun, signal: AbortSignal): Promise<void> {
     let promptDurable = false
     let dispatchStarted = false
+    let dispatchAccepted = false
     const lease = { nextHeartbeatAt: Date.now() + this.heartbeatIntervalMs }
     try {
       if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
@@ -138,12 +142,21 @@ export class PostgresRunWorker {
       await this.options.store.markDispatching(run.runId, run.attemptId)
       dispatchStarted = true
       const response = await this.options.backend.dispatch(run, signal)
+      dispatchAccepted = true
       await this.options.store.markDispatched(run.runId, run.attemptId, response)
+      const promptDeadline = Date.now() + this.promptPersistenceTimeoutMs
       while (!(promptDurable = await this.options.store.promptPersisted(run.runId))) {
         if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
           await this.cancelAndAwaitSettlement(run, signal, lease)
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
           return
+        }
+        if (Date.now() >= promptDeadline) {
+          await this.options.backend.cancel(run).catch(error => this.observe(error))
+          throw Object.assign(
+            new Error('DSH accepted the prompt but did not persist its user/message boundary before the deadline'),
+            { code: 'prompt_persistence_timeout' },
+          )
         }
         await this.heartbeatIfDue(run, lease)
         await delay(50, undefined, { signal })
@@ -176,7 +189,14 @@ export class PostgresRunWorker {
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
         } else if (cancelled) await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
         else if (!dispatchStarted && !promptDurable && await this.options.store.attemptCount(run.runId) < this.maximumAttempts) await this.options.store.requeueBeforeStart(run.runId, run.attemptId, 500)
-        else if (!promptDurable) await this.options.store.finishRun(run.runId, run.attemptId, 'failed', dispatchStarted ? 'prompt_dispatch_unknown' : 'dispatch_attempts_exhausted')
+        else if (!promptDurable) await this.options.store.finishRun(
+          run.runId,
+          run.attemptId,
+          'failed',
+          dispatchAccepted && error instanceof Error && 'code' in error
+            ? String(error.code)
+            : dispatchStarted ? 'prompt_dispatch_unknown' : 'dispatch_attempts_exhausted',
+        )
         else await this.options.store.finishRun(run.runId, run.attemptId, 'failed', error instanceof Error && 'code' in error ? String(error.code) : 'worker_execution_failed')
       } catch (settlementError) { this.observe(settlementError) }
       this.observe(error)

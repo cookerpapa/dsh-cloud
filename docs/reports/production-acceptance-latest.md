@@ -46,6 +46,22 @@ a newly created KVM while retaining both Workspace files and passing both test
 suites. Cube therefore supplies the isolated execution lifecycle; its durable
 Volume, not VM memory or process state, supplies Workspace continuity.
 
+## Follow-up authority and browser refresh regression
+
+A separate Session exercised four sequential Runs while the acceptance client
+closed and recreated its WebSocket between every Turn. The Runs moved across
+both Workers with monotonically increasing Workspace fences `1..4`: the second
+Turn recalled the first Turn's exact token, the third created and tested
+insertion sort, and the fourth retained that file while adding and testing
+binary search. All four terminal reasons were `completed`; no Run remained in
+`queued`/`dispatched`, and no stale-authority or `UNKNOWN` result occurred.
+
+The stricter refresh case submitted a follow-up prompt, received its queued Run
+id, immediately closed that connection, then opened a new event connection.
+Canonical Session history recovered the completed Turn and exact prior token
+in 3.16 seconds. This verifies both rapid follow-up fencing and refresh after
+admission rather than only reconnecting after a Turn has settled.
+
 ## Native Compaction baseline and cold Worker recovery
 
 The same Session was compacted using the real DeepSeek summarizer. Because the
@@ -108,10 +124,10 @@ from the first Turn in the second.
 | --- | ---: |
 | users / completed / failed | 6 / 6 / 0 |
 | completed Turns | 12 |
-| wall time | 21.2 s |
-| Turn duration p50 / p95 | 6.37 s / 14.59 s |
-| durable-first assistant p50 / p95 | 4.50 s / 11.47 s |
-| browser-visible native events | 578 |
+| wall time | 20.9 s |
+| Turn duration p50 / p95 | 6.87 s / 14.48 s |
+| durable-first assistant p50 / p95 | 4.78 s / 11.61 s |
+| browser-visible native events | 699 |
 
 ### Coding profile
 
@@ -124,10 +140,10 @@ stream; final prose alone could not pass the test.
 | --- | ---: |
 | users / completed / failed | 2 / 2 / 0 |
 | completed Turns | 4 |
-| wall time | 303.1 s |
-| Turn duration p50 / p95 | 102.97 s / 200.05 s |
-| durable-first assistant p50 / p95 | 4.50 s / 10.31 s |
-| browser-visible native events | 11,153 |
+| wall time | 303.4 s |
+| Turn duration p50 / p95 | 103.85 s / 199.04 s |
+| durable-first assistant p50 / p95 | 4.56 s / 10.72 s |
+| browser-visible native events | 8,276 |
 
 The long terminal latency reflects real multi-step model/Tool work and Python
 testing on this laptop's Cube compute plane. It must not be presented as a
@@ -152,7 +168,7 @@ Cube compute resources before either component reaches these raw rates.
 
 The deterministic suite covers:
 
-- 33 default unit/protocol checks and 84 PostgreSQL/Kafka/Valkey integration
+- 33 default unit/protocol checks and 87 PostgreSQL/Kafka/Valkey integration
   checks on the final source;
 - TypeScript builds, formatting and unused-symbol checks;
 - SessionPersistence upstream contract compatibility;

@@ -29,6 +29,7 @@ gateway:
 worker:
   replicas: 2
   slots: 4
+  promptPersistenceTimeoutMs: 30000
   drainTimeoutMs: 540000
   terminationGracePeriodSeconds: 600
   resources:

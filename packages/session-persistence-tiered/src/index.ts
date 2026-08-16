@@ -437,6 +437,15 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
   }
 
   private rememberAuthority(sessionId: string, authority: RunAuthority): void {
+    const existing = this.boundAuthorities.get(sessionId)
+    // A detached PersistenceCoordinator task can still carry the
+    // AsyncLocalStorage context of the previous Run.  Never let that older
+    // task move the process-local hint backwards after a follow-up Run has
+    // already installed a higher Workspace fence.
+    if (existing !== undefined && existing.writerFence > authority.writerFence) return
+    if (existing !== undefined
+      && existing.writerFence === authority.writerFence
+      && existing.attemptId !== authority.attemptId) return
     this.boundAuthorities.delete(sessionId)
     this.boundAuthorities.set(sessionId, Object.freeze({ ...authority }))
     while (this.boundAuthorities.size > 10_000) {
@@ -740,8 +749,17 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
 
   private writerAuthority(sessionId: SessionId): WriterAuthority {
     const runContext = this.ctx.get('cloudRunContext') as CloudRunContext | undefined
-    const current = runContext?.current()
-      ?? this.boundAuthorities.get(String(sessionId))
+    const inherited = runContext?.current()
+    const bound = this.boundAuthorities.get(String(sessionId))
+    // DSH's write-behind coordinator is intentionally asynchronous.  Its
+    // promise chain may inherit Run N's AsyncLocal context even after Run N+1
+    // has been admitted and bound for this Session.  Select the newest fenced
+    // authority instead of blindly preferring the inherited context.
+    const current = inherited === undefined
+      ? bound
+      : bound === undefined || inherited.writerFence >= bound.writerFence
+        ? inherited
+        : bound
     if (current === undefined) {
       if (this.requireWriterAuthority) {
         throw new Error('session persistence mutation requires active RunAttempt authority')

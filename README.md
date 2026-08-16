@@ -135,6 +135,7 @@ Important lifecycle values are deliberately shared across components:
 | Variable | Default | Contract |
 | --- | ---: | --- |
 | `DSH_CLOUD_RUN_LEASE_SECONDS` | 20 s | Used by both Worker reconciliation and Tool Broker authority checks; configure one identical value everywhere. |
+| `DSH_CLOUD_PROMPT_PERSIST_TIMEOUT_MS` | 30 s | Bounds the accepted-to-durable prompt boundary so a failed Session append cannot occupy a Worker slot indefinitely. |
 | `DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS` | 540 s | Maximum graceful Run drain before Worker abort; must remain below the orchestrator termination grace period. |
 | `DSH_CLOUD_SANDBOX_IDLE_TTL_MS` | 30 min | Warm KVM lifetime after its last Tool operation; Workspace bytes remain in the Cube Volume. |
 | `DSH_CLOUD_WORKER_SLOTS` | 4 | Concurrent active Agent Runs admitted by one Worker process. |

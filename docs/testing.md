@@ -34,6 +34,14 @@ The script persists its generated account, Workspace and Session in
 `/tmp/dsh-cloud-real-user.json` so a second invocation exercises native
 multi-Turn recovery instead of silently creating a new Session.
 
+The refresh regression submits a follow-up Turn, immediately closes its event
+connection, reconnects as the same user, and requires the completed answer to
+appear in canonical Session history:
+
+```bash
+pnpm acceptance:refresh
+```
+
 ## Concurrent workloads
 
 The `chat` profile creates independent users, Workspaces and Sessions, then

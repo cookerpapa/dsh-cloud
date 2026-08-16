@@ -139,6 +139,7 @@ async function startRunWorker(): Promise<void> {
       : `http://${process.env['DSH_CLOUD_POD_IP']}:${controlPort ?? port}`),
     maximumConcurrentRuns: Number(process.env['DSH_CLOUD_WORKER_SLOTS'] ?? '4'),
     attemptLeaseSeconds: Number(process.env['DSH_CLOUD_RUN_LEASE_SECONDS'] ?? '20'),
+    promptPersistenceTimeoutMs: Number(process.env['DSH_CLOUD_PROMPT_PERSIST_TIMEOUT_MS'] ?? '30000'),
     backend: new DshHttpRunBackend(localUrl),
     onError: error => console.error('DSH Cloud Worker:', error instanceof Error ? error.message : String(error)),
   })

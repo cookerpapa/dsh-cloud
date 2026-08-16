@@ -272,6 +272,61 @@ integration('cloud failure semantics', () => {
     expect(cancelled).toBe(true)
   })
 
+  test('fails an accepted prompt explicitly when its durable user boundary never appears', async () => {
+    const namespace = `prompt-persistence-timeout-${randomUUID()}`
+    const pool = new Pool({ connectionString, max: 10 })
+    const store = new ControlStore(pool, namespace)
+    await store.initialize()
+    const principal = await store.register('Prompt Timeout Tenant', `${randomUUID()}@example.test`, 'correct horse battery staple')
+    const workspace = await store.createWorkspace(principal.tenantId, 'Prompt Timeout Workspace')
+    const sessionId = randomUUID()
+    await store.registerSession({ sessionId, tenantId: principal.tenantId, workspaceId: workspace.id })
+    await materializeSession(pool, namespace, sessionId)
+    const rpcId = randomUUID()
+    const admitted = await store.enqueueRun({
+      tenantId: principal.tenantId,
+      sessionId,
+      clientRpcId: rpcId,
+      idempotencyKey: rpcId,
+      request: { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } },
+    })
+    let cancelCalls = 0
+    const backend: RunExecutionBackend = {
+      async dispatch(): Promise<unknown> { return { accepted: true } },
+      async cancel(): Promise<'absent'> { cancelCalls++; return 'absent' },
+    }
+    const worker = new PostgresRunWorker({
+      store,
+      notificationConnectionString: connectionString as string,
+      identity: 'prompt-timeout-worker',
+      baseUrl: 'http://127.0.0.1:49104',
+      maximumConcurrentRuns: 1,
+      pollIntervalMs: 25,
+      promptPersistenceTimeoutMs: 100,
+      backend,
+    })
+    cleanups.push(async () => {
+      await worker.stop()
+      await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1', [namespace])
+      await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1', [namespace])
+      await pool.query('DELETE FROM dsh_cloud.sessions WHERE namespace=$1', [namespace])
+      await pool.query('DELETE FROM dsh_cloud.persistence_state WHERE namespace=$1', [namespace])
+      await pool.end()
+    })
+    await worker.start()
+
+    const terminal = await eventually(
+      () => store.runResponse(admitted.runId),
+      value => value?.status === 'failed',
+    )
+    expect(terminal?.status).toBe('failed')
+    expect(cancelCalls).toBe(1)
+    const stored = await pool.query<{ error_code: string }>(`
+      SELECT error_code FROM dsh_cloud_control.runs WHERE namespace=$1 AND id=$2
+    `, [namespace, admitted.runId])
+    expect(stored.rows[0]?.error_code).toBe('prompt_persistence_timeout')
+  })
+
   test('does not report a durable model-error turn as a completed Run', async () => {
     const namespace = `model-error-${randomUUID()}`
     const pool = new Pool({ connectionString, max: 10 })
