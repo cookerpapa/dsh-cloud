@@ -52,7 +52,7 @@ function literalEdit(content: string, request: FsEditRequest, path: string): str
 }
 
 /** DSH filesystem provider whose complete execution world lives in Cube. */
-export class RemoteFileSystem extends FileSystem {
+class RemoteFileSystem extends FileSystem {
   static inject = ['cloudExecution']
   static Config = z.object({ workspaceRoot: z.string().default('/workspace') })
   private readonly locks = new Map<string, Promise<unknown>>()

@@ -2,100 +2,114 @@
 
 ## Scope
 
-This report validates the current DSH Cloud architecture on one self-hosted
-Linux machine. It exercises real DeepSeek model calls, the released DeepSeek
-Harness Web/Agent Loop, PostgreSQL state, independently replicated Gateway and
-Worker processes, and CubeSandbox KVM execution. The Kubernetes run uses two
-K3d nodes on one physical host, so it validates scheduling and process-level
-recovery; it does not claim host-level, control-plane, or storage high
-availability.
+This acceptance exercised DSH Cloud as an external user on one self-hosted
+Linux machine. It used the public registration/login page, the released DSH Web
+UI and Agent Loop, real DeepSeek model calls, PostgreSQL native Session
+persistence, two independently registered Worker processes, Sandbox Manager,
+and an existing CubeSandbox KVM control/compute installation.
 
-The accepted scheduling path contains no Temporal service:
+It validates the current service boundaries and cross-Worker recovery. It does
+not claim host-level high availability, hostile-public-SaaS isolation, or
+multi-region storage durability.
 
 ```text
-Browser -> Gateway -> PostgreSQL Run queue -> DSH Worker
-                                      |          |
-                                      |          +-> DeepSeek model
-                                      |          +-> Sandbox Manager -> Cube KVM
+Browser -> Gateway -> PostgreSQL Run queue -> DSH Worker -> DeepSeek
+                                      |             |
+                                      |             +-> Sandbox Manager -> Cube KVM
                                       +-> native DSH Session event log
 ```
 
-PostgreSQL is the sole authority for admission, Run/Attempt ownership, leases,
-Workspace fences and terminal state. KEDA observes only the queued-Run count to
-scale Worker replicas; it does not claim or execute work.
+There is no Temporal service or secondary Run dispatcher in this path.
 
 ## Automated verification
 
-- TypeScript project references build cleanly.
-- The default unit gate passes without requiring external infrastructure.
-- All 32 PostgreSQL and service integration tests pass, including Session
-  persistence, Run claims, Workspace-global fences, stale-Worker rejection,
-  browser durability, Cube Volume authentication, cancellation and failure
-  injection.
-- Helm lint, production Compose rendering and deployment-script syntax checks
-  pass in the same form used by CI.
+- all TypeScript project references build with unused local/parameter checks;
+- all 43 unit and PostgreSQL/service integration tests pass;
+- the tests cover Session persistence, cross-tenant access, Run claims,
+  Workspace-global fencing, stale terminal commits, expired post-prompt
+  recovery, concurrent activation, retryable Workspace deletion, browser
+  durability, protocol validation, cancellation and failure injection;
+- dependency audit reports no known production vulnerability;
+- Helm lint/render, production Compose rendering, shell syntax and whitespace
+  checks pass.
 
-## Kubernetes deployment
+## Real-user model and Cube test
 
-The acceptance release ran a K3d server node and agent node on the same physical
-host and reached Ready state with:
+The retained acceptance Session is
+`b646df56-aafc-4284-9f36-0a929ba3ae44` in the local production deployment.
+The user-visible path produced these results:
 
-- 2 Gateway replicas;
-- 2 DSH Worker replicas;
-- 3 Sandbox Manager replicas;
-- KEDA ScaledObject ready with a 2–100 Worker range;
-- PodDisruptionBudgets, non-root/read-only container policies and default-deny
-  NetworkPolicies rendered by the chart.
+| User action | Worker | Fence | Result | Run time |
+| --- | --- | ---: | --- | ---: |
+| simple conversation | worker-1 | 1 | completed without creating Cube | 1.397 s |
+| insertion-sort implementation and tests | worker-1 | 3 | file written in Cube; five assertions passed | 6.240 s |
+| read prior work, add binary search, run both suites | worker-2 | 4 | prior file recovered; five plus four assertions passed | 12.264 s |
+| final post-upgrade conversation | worker-2 | 5 | exact requested reply; no Tool call | 2.759 s |
+| final rebuilt-image conversation | worker-2 | 6 | exact requested reply; no Tool call | 1.496 s |
 
-## Real model and Cube KVM path
+Before the successful coding rerun, the first production Tool attempt exposed
+two integration defects rather than being discarded as a test artifact:
 
-One authenticated user submitted three consecutive coding prompts against one
-Workspace. The Harness created and tested an insertion-sort implementation,
-read the existing result in the next turn, and produced a final resume probe
-after the original Worker Pod was deleted.
+1. Gateway's default-deny proxy also blocked a tenant's own
+   `session.history` operation.
+2. The shared Cube installation's hardened Volume authorizer and DSH's Volume
+   identity disagreed, and an absent Volume deletion was not idempotent.
 
-Observed results:
+The proxy now forwards every known native Session operation only after tenant
+ownership checks. Cube control requests use its documented Bearer credential,
+the DSH Volume driver owns deterministic identities, and deletion probes before
+issuing a physical delete. The same user task was then repeated through the UI
+and passed.
 
-- all three Runs reached `completed` through real DeepSeek calls;
-- 14 Tool calls produced 14 durable Tool results;
-- the first two Runs executed on one Worker and the third on a replacement
-  Worker;
-- native DSH Session context was recovered from PostgreSQL on the replacement;
-- one Cube activation and one persistent Cube Volume were retained across the
-  handoff, so the replacement Worker saw the prior Workspace files;
-- Workspace writer fences advanced monotonically across Runs and Sessions.
+Worker-1 was drained and stopped before the final prompt. Worker-2 loaded the
+official DSH Session from PostgreSQL, claimed a new Workspace fence, rebound
+the same warm Cube activation, read `insertion_sort.py`, created
+`binary_search.py`, and executed both test programs successfully. The activation
+and persistent Volume identities remained unchanged while the fence advanced
+from 3 to 4.
 
-This proves cross-Worker Session and Workspace recovery. It does not claim that
-process memory survives KVM destruction: only a warm activation preserves live
-processes, while the Cube Volume is the durable file boundary.
+This demonstrates that correctness does not depend on one permanent DSH
+process. It does not claim that process memory survives Cube destruction: a
+warm Cube retains processes, while only Workspace files survive a replacement
+KVM through the persistent Volume.
 
-## Streaming durability and write amplification
+The final request ran after rebuilding and replacing both Worker containers
+against their existing persistent DSH homes. This also verified that the
+launcher repairs platform-owned plugin links whose image-local target changed
+across an upgrade, without replacing unrelated user files.
 
-The three real coding Runs produced 5,562 logical DSH Session events. Lossless
-chunk packing stored them in 963 PostgreSQL rows, an 82.7% row reduction. Reads
-expanded the ranged rows back into the original ordered DSH event stream. The
-Gateway forwarded an event only after the persistence watermark covered its
-logical sequence, preserving the visible-implies-durable contract.
+## Streaming persistence
 
-## Cancellation and recovery
+The retained six-Turn Session contains 3,274 logical native DSH events in 599
+PostgreSQL rows. Lossless adjacent-delta packing therefore reduced physical rows
+by 81.7 percent while reads still expand the exact ordered event sequence.
+Gateway exposes a Session event only after the PostgreSQL durability watermark
+covers it.
 
-In Kubernetes, a real foreground Python command sleeping for 60 seconds was
-cancelled after its Tool call started. The Run reached `cancelled` in about
-614 ms and the remote process was terminated through the fenced Tool path.
+This design deliberately does not add Kafka/Valkey to DSH Cloud. The native DSH
+event log is also the Harness recovery and model-context authority, so keeping
+one lossless ordered store avoids a dual-log reconciliation problem.
 
-The separate one-host Docker acceptance also exercised cold Cube replacement:
-Workspace files remained in the persistent Cube Volume after the source KVM was
-destroyed, and a replacement activation recovered them. Foreground cancellation
-completed in about 575 ms in that profile.
+## Tenant and lifecycle checks
+
+- a separately registered tenant received `session-not-found` when requesting
+  the acceptance Session history;
+- an empty Workspace was created and deleted through the public cloud API;
+- Workspace lifecycle requests remain available even when every Agent Worker
+  is draining;
+- persistent deletion is retryable: an ambiguous provider failure leaves the
+  Workspace hidden in `deleting` instead of reactivating a possibly erased
+  directory.
 
 ## Accepted limits
 
-- This is a self-hosted enterprise baseline, not evidence of hostile public
-  SaaS isolation or multi-region disaster recovery.
-- Cube control/compute capacity and PostgreSQL availability remain external
-  deployment responsibilities.
-- Arbitrary shell effects are not advertised as exactly-once. If execution
-  occurred but its result cannot be confirmed, the outcome remains unknown
-  rather than being replayed blindly.
-- KEDA availability affects scaling responsiveness only; queued Runs remain
-  durable and claimable through PostgreSQL.
+- Cube control/compute capacity, PostgreSQL availability and the persistent
+  Volume driver remain deployment responsibilities.
+- Arbitrary shell execution is not advertised as exactly once. Once the native
+  prompt is durable, the Run is not blindly replayed after an ambiguous Tool
+  outcome.
+- KEDA changes Worker replica count from PostgreSQL backlog only; it is not a
+  scheduler and is not required for queued-Run correctness.
+- The local acceptance reused AgentDock's installed Cube Volume plugin solely
+  to exercise the KVM path. A standalone DSH Cloud deployment uses the included
+  `dsh-cloud-posix` driver and its own authorization policy.

@@ -9,18 +9,11 @@
   },
   "dependencies": {
     "@dsh-cloud/control-store": "workspace:*",
-    "@dsh-cloud/execution-agent": "workspace:*",
-    "@dsh-cloud/execution-client": "workspace:*",
     "@dsh-cloud/execution-protocol": "workspace:*",
-    "@dsh-cloud/fs-remote": "workspace:*",
     "@dsh-cloud/run-context": "workspace:*",
-    "@dsh-cloud/run-admission": "workspace:*",
     "@dsh-cloud/run-queue": "workspace:*",
     "@dsh-cloud/sandbox-manager": "workspace:*",
-    "@dsh-cloud/sandbox-remote": "workspace:*",
-    "@dsh-cloud/session-persistence-postgres": "workspace:*",
-    "@dsh-cloud/subprocess-remote": "workspace:*",
-    "@dsh-cloud/web-bundle": "workspace:*"
+    "@dsh-cloud/session-persistence-postgres": "workspace:*"
   },
   "scripts": {
     "build": "tsc -b",

@@ -54,7 +54,7 @@ declare module '@deepseek-ai/cordis' {
  * and every durable or remote mutation validates the fence again at its own
  * commit boundary.
  */
-export class CloudRunContext extends Service {
+class CloudRunContext extends Service {
   private readonly storage = new AsyncLocalStorage<RunAuthority>()
 
   constructor(ctx: Context) {
@@ -80,4 +80,3 @@ export class CloudRunContext extends Service {
 }
 
 export default CloudRunContext
-

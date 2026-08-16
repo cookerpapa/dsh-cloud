@@ -56,7 +56,7 @@ export class ExecutionRemoteError extends Error {
 }
 
 /** Trusted HTTP client for one current RunAttempt's remote execution world. */
-export class CloudExecutionClient extends Service {
+class CloudExecutionClient extends Service {
   static inject = ['cloudRunContext']
   static Config: z<Config> = z.object({
     managerUrl: z.string(),

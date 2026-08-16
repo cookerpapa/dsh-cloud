@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createServer, type Server } from 'node:http'
-import { mkdir, realpath, symlink } from 'node:fs/promises'
+import { lstat, mkdir, realpath, symlink, unlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,8 +44,15 @@ async function exposeCloudPlugin(packageName: string): Promise<void> {
       await symlink(packageRoot, link, process.platform === 'win32' ? 'junction' : 'dir')
     } catch (linkError: unknown) {
       if ((linkError as NodeJS.ErrnoException).code !== 'EEXIST') throw linkError
-      await assertTarget()
+      const existing = await lstat(link)
+      if (!existing.isSymbolicLink()) {
+        await assertTarget()
+        return
+      }
+      await unlink(link)
+      await symlink(packageRoot, link, process.platform === 'win32' ? 'junction' : 'dir')
     }
+    await assertTarget()
   }
 }
 

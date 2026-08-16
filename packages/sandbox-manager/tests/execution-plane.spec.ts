@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { Pool } from 'pg'
 import { afterEach, describe, expect, it } from 'vitest'
+import { ControlStore } from '@dsh-cloud/control-store'
 import CloudRunContext, { cloudIdentifier, writerFence, type RunAuthority } from '@dsh-cloud/run-context'
 import CloudExecutionClient from '@dsh-cloud/execution-client'
 import RemoteFileSystem from '@dsh-cloud/fs-remote'
@@ -15,7 +16,7 @@ import { ExecutionEngine } from '@dsh-cloud/execution-agent/engine'
 import { createExecutionAgent } from '@dsh-cloud/execution-agent'
 import { parseExecutionResponse, type ExecutionRequest, type ExecutionResponse } from '@dsh-cloud/execution-protocol'
 import { SandboxManager } from '../src/index.js'
-import { CubeSandboxProvider } from '../src/cube-provider.js'
+import CubeSandboxProvider from '../src/cube-provider.js'
 import type { ManagedSandbox, SandboxBinding, SandboxHandle, SandboxProvider } from '../src/provider.js'
 
 const databaseUrl = process.env['DSH_CLOUD_TEST_DATABASE_URL']
@@ -82,6 +83,31 @@ class InventoryProvider implements SandboxProvider {
   async listManaged(): Promise<readonly ManagedSandbox[]> { return this.inventory }
 }
 
+class SlowProvider implements SandboxProvider {
+  creates = 0
+  deleteFailuresRemaining = 0
+  readonly deletedWorkspaces: Array<{ tenantId: string; workspaceId: string }> = []
+
+  async create(input: Readonly<{ activationId: string }>): Promise<SandboxHandle> {
+    this.creates++
+    await new Promise(resolve => setTimeout(resolve, 75))
+    return { provider: 'slow', sandboxId: input.activationId, endpoint: 'http://unused' }
+  }
+  async bind(): Promise<void> {}
+  async execute(_handle: SandboxHandle, _binding: SandboxBinding, request: ExecutionRequest): Promise<ExecutionResponse> {
+    return { protocolVersion: 1, operationId: request.operationId, ok: true, result: [] }
+  }
+  async destroy(): Promise<void> {}
+  async inspect(): Promise<'ready'> { return 'ready' }
+  async destroyWorkspace(input: Readonly<{ tenantId: string; workspaceId: string }>): Promise<void> {
+    if (this.deleteFailuresRemaining > 0) {
+      this.deleteFailuresRemaining--
+      throw new Error('injected persistent storage failure')
+    }
+    this.deletedWorkspaces.push(input)
+  }
+}
+
 function authority(workspace: string, fence: number, attempt = `attempt-${fence}`): RunAuthority {
   return {
     tenantId: cloudIdentifier('TenantId', 'tenant-a'),
@@ -146,7 +172,7 @@ async function setup(): Promise<{
     await new Promise<void>(resolve => managerServer.close(() => resolve()))
     await new Promise<void>(resolve => agent.close(() => resolve()))
     await engine.dispose()
-    await pool.query('DELETE FROM dsh_cloud_sandbox_activation WHERE namespace = $1', [namespace])
+    await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace = $1', [namespace])
     await pool.end()
     await rm(root, { recursive: true, force: true })
   }
@@ -157,9 +183,9 @@ async function setup(): Promise<{
 describe('Cube provider contract', () => {
   it('uses Cube official API-key authentication for Volume lifecycle calls', async () => {
     const serverPort = await port()
-    let headers: Record<string, string | string[] | undefined> | undefined
+    const requests: Array<{ method: string | undefined; headers: Record<string, string | string[] | undefined> }> = []
     const server = createHttpServer((request, response) => {
-      headers = request.headers
+      requests.push({ method: request.method, headers: request.headers })
       response.writeHead(204).end()
     })
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', resolve) })
@@ -176,8 +202,36 @@ describe('Cube provider contract', () => {
         egressProxyIp: '192.0.2.1',
       })
       await provider.destroyWorkspace({ tenantId: 'tenant', workspaceId: 'workspace' })
-      expect(headers?.['x-api-key']).toBe('cube-contract-key')
-      expect(headers?.['authorization']).toBe('Bearer cube-contract-key')
+      expect(requests.map(request => request.method)).toEqual(['GET', 'DELETE'])
+      expect(requests.every(request => request.headers['x-api-key'] === undefined)).toBe(true)
+      expect(requests.every(request => request.headers['authorization'] === 'Bearer cube-contract-key')).toBe(true)
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+    }
+  })
+
+  it('treats an absent persistent Volume as an idempotent Workspace deletion', async () => {
+    const serverPort = await port()
+    const methods: string[] = []
+    const server = createHttpServer((request, response) => {
+      methods.push(request.method ?? '')
+      response.writeHead(404).end()
+    })
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', resolve) })
+    try {
+      const provider = new CubeSandboxProvider({
+        namespace: 'test',
+        apiUrl: `http://127.0.0.1:${serverPort}`,
+        apiKey: 'cube-contract-key',
+        templateId: 'template',
+        proxyNodeIp: '127.0.0.1',
+        proxyPort: serverPort,
+        proxyScheme: 'http',
+        sandboxDomain: 'cube.test',
+        egressProxyIp: '192.0.2.1',
+      })
+      await provider.destroyWorkspace({ tenantId: 'tenant', workspaceId: 'workspace' })
+      expect(methods).toEqual(['GET'])
     } finally {
       await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
     }
@@ -185,6 +239,94 @@ describe('Cube provider contract', () => {
 })
 
 integration('remote DSH execution plane', () => {
+  it('single-flights concurrent first Tool calls through one durable activation', async () => {
+    const pool = new Pool({ connectionString: databaseUrl, max: 4 })
+    const namespace = `singleflight-${randomUUID()}`
+    const provider = new SlowProvider()
+    const manager = new SandboxManager({
+      pool,
+      namespace,
+      internalToken: 'integration-sandbox-manager-token-32-characters',
+      encryptionKey: randomBytes(32),
+      provider,
+      authorityVerifier: async () => undefined,
+    })
+    await manager.initialize()
+    const runAuthority = authority('workspace-singleflight', 1)
+    const operation = { kind: 'fs.list', path: '/workspace' } as const
+    try {
+      const responses = await Promise.all([1, 2].map(index => manager.execute({
+        protocolVersion: 1,
+        operationId: `parallel-${index}`,
+        authority: runAuthority,
+        operation,
+      })))
+      expect(responses.every(response => response.ok)).toBe(true)
+      expect(provider.creates).toBe(1)
+    } finally {
+      await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1', [namespace])
+      await pool.end()
+    }
+  })
+
+  it('deletes the persistent provider state before removing a reserved Workspace', async () => {
+    const pool = new Pool({ connectionString: databaseUrl, max: 4 })
+    const namespace = `workspace-delete-${randomUUID()}`
+    const store = new ControlStore(pool, namespace)
+    await store.initialize()
+    const principal = await store.register('Deletion Tenant', `${randomUUID()}@example.test`, 'correct horse battery staple')
+    const workspace = await store.createWorkspace(principal.tenantId, 'Disposable')
+    expect(await store.beginWorkspaceDeletion(principal.tenantId, workspace.id)).toBe(true)
+    const provider = new SlowProvider()
+    const manager = new SandboxManager({
+      pool,
+      namespace,
+      internalToken: 'integration-sandbox-manager-token-32-characters',
+      encryptionKey: randomBytes(32),
+      provider,
+      authorityVerifier: async () => undefined,
+    })
+    await manager.initialize()
+    try {
+      await manager.destroyWorkspace(principal.tenantId, workspace.id)
+      expect(provider.deletedWorkspaces).toEqual([{ tenantId: principal.tenantId, workspaceId: workspace.id }])
+      expect(await store.workspaceOwned(principal.tenantId, workspace.id)).toBe(false)
+    } finally {
+      await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1', [namespace])
+      await pool.end()
+    }
+  })
+
+  it('keeps an ambiguous Workspace deletion reserved until the physical operation can be retried', async () => {
+    const pool = new Pool({ connectionString: databaseUrl, max: 4 })
+    const namespace = `workspace-delete-retry-${randomUUID()}`
+    const store = new ControlStore(pool, namespace)
+    await store.initialize()
+    const principal = await store.register('Retry Tenant', `${randomUUID()}@example.test`, 'correct horse battery staple')
+    const workspace = await store.createWorkspace(principal.tenantId, 'Retry deletion')
+    expect(await store.beginWorkspaceDeletion(principal.tenantId, workspace.id)).toBe(true)
+    const provider = new SlowProvider()
+    provider.deleteFailuresRemaining = 1
+    const manager = new SandboxManager({
+      pool,
+      namespace,
+      internalToken: 'integration-sandbox-manager-token-32-characters',
+      encryptionKey: randomBytes(32),
+      provider,
+      authorityVerifier: async () => undefined,
+    })
+    await manager.initialize()
+    try {
+      await expect(manager.destroyWorkspace(principal.tenantId, workspace.id)).rejects.toThrow(/injected/)
+      expect(await store.workspaceOwned(principal.tenantId, workspace.id)).toBe(false)
+      await expect(manager.destroyWorkspace(principal.tenantId, workspace.id)).resolves.toBeUndefined()
+      expect(provider.deletedWorkspaces).toEqual([{ tenantId: principal.tenantId, workspaceId: workspace.id }])
+    } finally {
+      await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1', [namespace])
+      await pool.end()
+    }
+  })
+
   it('reconciles a physical Cube that has no PostgreSQL activation record', async () => {
     const pool = new Pool({ connectionString: databaseUrl, max: 2 })
     const namespace = `orphan-${randomUUID()}`
@@ -205,7 +347,7 @@ integration('remote DSH execution plane', () => {
       await expect(manager.reconcile(60_000)).resolves.toEqual({ destroyed: 0, missing: 0, orphaned: 1 })
       expect(provider.destroyed).toEqual(['orphan-cube'])
     } finally {
-      await pool.query('DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1', [namespace])
+      await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1', [namespace])
       await pool.end()
     }
   })

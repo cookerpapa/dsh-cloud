@@ -18,6 +18,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
   beforeAll(async()=>{
     fake=createServer(async(request,response)=>{
       if(request.url==='/'&&request.method==='GET'){response.writeHead(200,{'content-type':'text/html'});response.end('<main>official dsh ui</main>');return}
+      if(request.url==='/v1/workspaces/destroy'&&request.method==='POST'){response.writeHead(200,{'content-type':'application/json'});response.end('{"deleted":true}');return}
       const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));const envelope=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {rpcId:string;method:string;payload:Record<string,unknown>}
       let value:unknown={}
       if(envelope.method==='session.create')value={sessionId:envelope.payload['sessionId']}
@@ -26,7 +27,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
       const body=JSON.stringify({type:'server-response',rpcId:envelope.rpcId,result:{ok:true,value}});response.writeHead(200,{'content-type':'application/json','content-length':String(Buffer.byteLength(body))});response.end(body)
     })
     const workerPort=await listen(fake)
-    gateway=new CloudGateway({pool,namespace,secureCookies:false})
+    gateway=new CloudGateway({pool,namespace,secureCookies:false,sandboxManager:{url:`http://127.0.0.1:${workerPort}`,token:'test-manager-token'}})
     await gateway.initialize()
     await gateway.store.heartbeatWorker({id:'worker-test',baseUrl:`http://127.0.0.1:${workerPort}`,maximumRuns:4})
     await gateway.listen(0,'127.0.0.1');baseUrl=`http://127.0.0.1:${gateway.address()!.port}`
@@ -61,5 +62,39 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const second=await fetch(`${baseUrl}/cloud/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'B',email:'b@example.test',password:'another secure password'})});const otherCookie=second.headers.get('set-cookie')!.split(';')[0]!
     const response=await fetch(`${baseUrl}/api/session.history`,{method:'POST',headers:{cookie:otherCookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.history',payload:{sessionId:ownedSession}})})
     const value=await response.json() as {result:{ok:boolean;error:{code:string}}};expect(value.result).toMatchObject({ok:false,error:{code:'session-not-found'}})
+  })
+
+  test('forwards tenant-owned Session reads after the ownership check',async()=>{
+    const response=await fetch(`${baseUrl}/api/session.history`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.history',payload:{sessionId:ownedSession}})})
+    const value=await response.json() as {result:{ok:boolean;value:{events:unknown[]}}}
+    expect(value.result).toMatchObject({ok:true,value:{events:[]}})
+  })
+
+  test('denies upstream Host mutations that have no tenant-scoped cloud contract',async()=>{
+    const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.update',payload:{patch:{}}}
+    const response=await fetch(`${baseUrl}/api/settings.update`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(envelope)})
+    const value=await response.json() as {result:{ok:boolean;error:{code:string}}}
+    expect(value.result).toMatchObject({ok:false,error:{code:'forbidden'}})
+  })
+
+  test('does not bypass RPC policy through another HTTP method',async()=>{
+    const response=await fetch(`${baseUrl}/api/settings.update`,{headers:{cookie}})
+    expect(response.status).toBe(405)
+  })
+
+  test('keeps Workspace lifecycle operations available while no Agent Worker is schedulable',async()=>{
+    await gateway.store.setWorkerDraining('worker-test',true)
+    try {
+      const createEnvelope={type:'client-request',rpcId:randomUUID(),method:'workspace.create',payload:{path:'Disposable'}}
+      const created=await fetch(`${baseUrl}/api/workspace.create`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(createEnvelope)})
+      const createdBody=await created.json() as {result:{value:{workspace:{workspaceId:string}}}}
+      expect(created.status).toBe(200)
+      const workspaceId=createdBody.result.value.workspace.workspaceId
+      const deleteEnvelope={type:'client-request',rpcId:randomUUID(),method:'workspace.delete',payload:{workspaceId}}
+      const deleted=await fetch(`${baseUrl}/api/workspace.delete`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(deleteEnvelope)})
+      expect(await deleted.json()).toMatchObject({result:{ok:true,value:{deleted:true}}})
+    } finally {
+      await gateway.store.setWorkerDraining('worker-test',false)
+    }
   })
 })

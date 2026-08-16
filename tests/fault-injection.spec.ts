@@ -72,7 +72,7 @@ integration('cloud failure semantics', () => {
     })
     await manager.initialize()
     cleanups.push(async () => {
-      await pool.query('DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1', [namespace])
+      await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1', [namespace])
       await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1', [namespace])
       await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1', [namespace])
       await pool.end()

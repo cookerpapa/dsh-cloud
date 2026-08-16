@@ -7,7 +7,7 @@ import type { ConfinedArgv, SandboxPolicy } from '@deepseek-ai/dsh-sandbox'
  * No same-host wrapper is added: filesystem containment, credentials, network
  * and process isolation are enforced by the execution plane around the argv.
  */
-export class RemoteSandboxProvider extends SandboxProvider {
+class RemoteSandboxProvider extends SandboxProvider {
   constructor(ctx: Context) { super(ctx) }
 
   override confine(argv: readonly string[], _policy: SandboxPolicy): ConfinedArgv {

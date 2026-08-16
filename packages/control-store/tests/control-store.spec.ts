@@ -136,8 +136,47 @@ enabled('PostgreSQL control authority', () => {
     if (reclaimed.kind === 'claimed') {
       expect(reclaimed.run.runId).toBe(claimed.run.runId)
       expect(reclaimed.run.writerFence).toBeGreaterThan(claimed.run.writerFence)
+      await expect(store.finishRun(claimed.run.runId, claimed.run.attemptId, 'completed'))
+        .rejects.toMatchObject({ code: 'ESTALE' })
       await store.finishRun(reclaimed.run.runId, reclaimed.run.attemptId, 'completed')
     }
+  })
+
+  test('settles a dirty Workspace when a post-prompt Worker lease expires', async () => {
+    const sessionId = randomUUID()
+    const expiredWorkspace = (await store.createWorkspace(tenantId, `Expired-${sessionId}`)).id
+    await store.registerSession({ sessionId, tenantId, workspaceId: expiredWorkspace, preferredWorkerId: 'worker-a' })
+    const rpcId = randomUUID()
+    const admitted = await store.enqueueRun({
+      tenantId,
+      sessionId,
+      clientRpcId: rpcId,
+      idempotencyKey: `dirty-expiry-${rpcId}`,
+      request: { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } },
+    })
+    const claimed = await store.claimNext('worker-a')
+    expect(claimed.kind).toBe('claimed')
+    if (claimed.kind !== 'claimed') return
+    await pool.query(`INSERT INTO dsh_cloud.persistence_state(namespace,store_id) VALUES($1,$2) ON CONFLICT(namespace) DO NOTHING`, [namespace, randomUUID()])
+    await pool.query(`
+      INSERT INTO dsh_cloud.sessions(namespace,id,header,incarnation,revision,next_seq,writer_fence,writer_attempt_id)
+      VALUES($1,$2,$3,$4,1,1,$5,$6)
+    `, [namespace, sessionId, JSON.stringify({ version: 3, id: sessionId, createdAt: Date.now(), cwd: '/workspace' }), randomUUID(), claimed.run.writerFence, claimed.run.attemptId])
+    await pool.query(`
+      INSERT INTO dsh_cloud.session_events(namespace,session_id,seq,seq_end,event)
+      VALUES($1,$2,0,0,$3)
+    `, [namespace, sessionId, JSON.stringify({ type: 'user/message', seq: 0, time: Date.now(), data: { source: { kind: 'user', rpcId } } })])
+    await pool.query(`UPDATE dsh_cloud_control.workspaces SET dirty_fence=$3 WHERE namespace=$1 AND id=$2`, [namespace, expiredWorkspace, claimed.run.writerFence])
+    await pool.query(`UPDATE dsh_cloud_control.run_attempts SET heartbeat_at=now()-interval '1 minute' WHERE namespace=$1 AND id=$2`, [namespace, claimed.run.attemptId])
+
+    expect(await store.reconcileExpiredAttempts(20)).toEqual({ requeued: 0, failed: 1 })
+    expect((await store.runResponse(admitted.runId))?.status).toBe('failed')
+    const workspace = await pool.query<{ revision: string; dirty_fence: string }>(`
+      SELECT revision::text,dirty_fence::text FROM dsh_cloud_control.workspaces
+       WHERE namespace=$1 AND id=$2
+    `, [namespace, expiredWorkspace])
+    expect(workspace.rows[0]).toEqual({ revision: '1', dirty_fence: '0' })
+    await pool.query('DELETE FROM dsh_cloud.sessions WHERE namespace=$1 AND id=$2', [namespace, sessionId])
   })
 
   test('idle metadata commands receive a fenced, short-lived writer grant', async () => {

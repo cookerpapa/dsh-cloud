@@ -105,6 +105,13 @@ can preserve processes across Runs for the configured idle TTL; after KVM loss
 or reaping, a new activation mounts the same Volume and recovers files while
 process and memory state are explicitly treated as disposable.
 
+Workspace deletion is a retryable lifecycle operation. Gateway first changes
+an empty Workspace from `active` to `deleting`, making it unavailable to new
+Sessions. Sandbox Manager then retires any activation, deletes the persistent
+Volume, and finally removes the PostgreSQL Workspace row. An ambiguous remote
+failure leaves the row in `deleting` for retry; it is never reactivated after
+the platform may already have deleted its bytes.
+
 ## Browser durability
 
 The official DSH Worker emits fine-grained Session events. Before Gateway
@@ -131,4 +138,5 @@ The implementation deliberately ends with PostgreSQL scheduling rather than a
 Temporal milestone. PostgreSQL already owns admission, leases, fencing and
 terminal commits; KEDA only changes Worker replica count from the queued-Run
 backlog. See the [latest acceptance report](reports/production-acceptance-latest.md)
-for the measured boundary.
+for the measured boundary and the [AgentDock alignment review](agentdock-alignment.md)
+for the deliberate runtime-specific differences.

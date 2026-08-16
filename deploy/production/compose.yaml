@@ -15,6 +15,12 @@ x-worker-environment: &worker-environment
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?DeepSeek API key is required}
   DSH_HOME: /var/lib/dsh
 
+x-worker-healthcheck: &worker-healthcheck
+  test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9090/metrics').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  interval: 5s
+  timeout: 3s
+  retries: 30
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -79,6 +85,7 @@ services:
       <<: *worker-environment
       DSH_CLOUD_WORKER_ID: worker-1
       DSH_CLOUD_WORKER_URL: http://worker-1:3080
+    healthcheck: *worker-healthcheck
 
   worker-2:
     build: *worker-build
@@ -93,6 +100,7 @@ services:
       <<: *worker-environment
       DSH_CLOUD_WORKER_ID: worker-2
       DSH_CLOUD_WORKER_URL: http://worker-2:3080
+    healthcheck: *worker-healthcheck
 
   gateway:
     build:
@@ -111,6 +119,8 @@ services:
       DSH_CLOUD_GATEWAY_PORT: 8080
       DSH_CLOUD_SECURE_COOKIES: ${DSH_CLOUD_SECURE_COOKIES:-0}
       DSH_CLOUD_PUBLIC_ORIGIN: ${DSH_CLOUD_PUBLIC_ORIGIN:-}
+      DSH_CLOUD_SANDBOX_MANAGER_URL: http://manager:3090
+      DSH_CLOUD_SANDBOX_MANAGER_TOKEN: ${DSH_CLOUD_SANDBOX_MANAGER_TOKEN:?manager token is required}
     ports:
       - "${DSH_CLOUD_HTTP_BIND:-127.0.0.1}:${DSH_CLOUD_HTTP_PORT:-8080}:8080"
     networks: [platform]

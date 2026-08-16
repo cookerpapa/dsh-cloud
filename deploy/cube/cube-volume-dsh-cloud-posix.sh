@@ -21,6 +21,6 @@ case "$operation" in
   create) [[ -z "$name"||"$name" == "$volume_id" ]]||fail;safe_root;[[ ! -L "$volume_path" && ! -L "$workspace_path" ]]||fail;mkdir -p -- "$workspace_path";chmod 0700 -- "$volume_path" "$workspace_path";chown 1000:1000 -- "$volume_path" "$workspace_path";printf '%s\n' '{"token":"","private_data":"dsh-cloud-posix-v1","error":""}';;
   attach) [[ -n "$sandbox_id"&&-n "$namespace"&&"$ref_count" =~ ^[0-9]+$ ]]||fail;[[ -z "$private_data"||"$private_data" == "dsh-cloud-posix-v1" ]]||fail;safe_root;safe_volume;safe_workspace;printf '{"host_path":"%s","metadata":{"driver":"dsh-cloud-posix-v1"},"error":""}\n' "$workspace_path";;
   detach) [[ -n "$sandbox_id"&&-n "$namespace"&&"$ref_count" =~ ^[0-9]+$ ]]||fail;[[ -z "$metadata"||"$metadata" == '{"driver":"dsh-cloud-posix-v1"}' ]]||fail;printf '%s\n' '{"error":""}';;
-  destroy) safe_root;if [[ ! -e "$volume_path" ]];then printf '%s\n' '{"error":""}';exit 0;fi;safe_volume;safe_workspace;rmdir -- "$workspace_path" "$volume_path" 2>/dev/null||fail;printf '%s\n' '{"error":""}';;
+  destroy) safe_root;if [[ ! -e "$volume_path" ]];then printf '%s\n' '{"error":""}';exit 0;fi;safe_volume;safe_workspace;find -P "$workspace_path" -mindepth 1 -delete||fail;rmdir -- "$workspace_path" "$volume_path"||fail;printf '%s\n' '{"error":""}';;
   *) fail;;
 esac

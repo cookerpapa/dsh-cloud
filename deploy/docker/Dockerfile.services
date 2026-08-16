@@ -4,12 +4,24 @@ ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 WORKDIR /src
 RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends g++ make python3 \
- && rm -rf /var/lib/apt/lists/* && corepack enable
+ && rm -rf /var/lib/apt/lists/* \
+ && corepack enable \
+ && corepack prepare pnpm@11.7.0 --activate
 COPY . .
-RUN pnpm install --frozen-lockfile && pnpm build \
- && pnpm --filter @dsh-cloud/web deploy --prod --legacy /out/worker \
- && pnpm --filter @dsh-cloud/gateway deploy --prod --legacy /out/gateway \
- && pnpm --filter @dsh-cloud/sandbox-manager deploy --prod --legacy /out/manager
+RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
+ pnpm install --frozen-lockfile && pnpm build
+
+FROM build AS worker-package
+RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
+ pnpm --filter @dsh-cloud/web deploy --prod --legacy /out/worker
+
+FROM build AS gateway-package
+RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
+ pnpm --filter @dsh-cloud/gateway deploy --prod --legacy /out/gateway
+
+FROM build AS manager-package
+RUN --mount=type=cache,id=dsh-cloud-pnpm-store,target=/pnpm/store \
+ pnpm --filter @dsh-cloud/sandbox-manager deploy --prod --legacy /out/manager
 
 FROM node:24-bookworm-slim AS worker
 ENV NODE_ENV=production
@@ -18,7 +30,7 @@ RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/d
  && apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client python3 tini \
  && rm -rf /var/lib/apt/lists/* && mkdir -p /workspace /var/lib/dsh \
  && chown node:node /app /workspace /var/lib/dsh
-COPY --from=build --chown=node:node /out/worker/ /app/
+COPY --from=worker-package --chown=node:node /out/worker/ /app/
 USER node
 EXPOSE 3080
 EXPOSE 9090
@@ -30,7 +42,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
-COPY --from=build --chown=node:node /out/gateway/ /app/
+COPY --from=gateway-package --chown=node:node /out/gateway/ /app/
 USER node
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini","--"]
@@ -41,7 +53,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
  && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
-COPY --from=build --chown=node:node /out/manager/ /app/
+COPY --from=manager-package --chown=node:node /out/manager/ /app/
 USER node
 EXPOSE 3090
 ENTRYPOINT ["/usr/bin/tini","--"]

@@ -80,7 +80,10 @@ the released DSH Web profile through the Cloud overlay before fetching the
 official frontend. CI runs both gates on every push.
 
 See [the architecture document](docs/architecture.md) for ownership and failure boundaries.
-The latest reproducible Docker/Kubernetes, real-model, and Cube KVM results are
+The [AgentDock alignment review](docs/agentdock-alignment.md) records which
+cloud invariants are shared and why DSH-specific event persistence and Worker
+transport affinity remain different.
+The latest automated, real-model, and Cube KVM results are
 recorded in the [production acceptance report](docs/reports/production-acceptance-latest.md).
 
 ## One-host deployment

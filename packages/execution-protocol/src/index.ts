@@ -130,11 +130,112 @@ function boundedString(value: unknown, label: string, maximum = 4096): string {
   return value
 }
 
+function boundedText(value: unknown, label: string, maximum: number): string {
+  if (typeof value !== 'string' || value.length > maximum || value.includes('\0')) {
+    throw new TypeError(`${label} is invalid`)
+  }
+  return value
+}
+
 function safeInteger(value: unknown, label: string, minimum = 0, maximum = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
     throw new TypeError(`${label} is invalid`)
   }
   return value as number
+}
+
+function boolean(value: unknown, label: string): void {
+  if (typeof value !== 'boolean') throw new TypeError(`${label} is invalid`)
+}
+
+function stringArray(value: unknown, label: string, maximumItems = 256): void {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximumItems) {
+    throw new TypeError(`${label} is invalid`)
+  }
+  for (const [index, item] of value.entries()) boundedString(item, `${label}[${index}]`, 32 * 1024)
+}
+
+function environment(value: unknown, label: string): void {
+  if (value === undefined) return
+  const entries = Object.entries(record(value, label))
+  if (entries.length > 256) throw new TypeError(`${label} has too many entries`)
+  for (const [key, item] of entries) {
+    boundedString(key, `${label} key`, 256)
+    if (item !== undefined) boundedText(item, `${label}.${key}`, 128 * 1024)
+  }
+}
+
+/** Validate every operation field at the trusted/untrusted protocol boundary. */
+function validateOperation(value: unknown): void {
+  const operation = record(value, 'execution operation')
+  const kind = boundedString(operation['kind'], 'operation kind', 64)
+  const path = (field = 'path'): void => { boundedString(operation[field], `operation ${field}`, 32 * 1024) }
+  const pid = (): void => { safeInteger(operation['pid'], 'operation pid', 1) }
+  switch (kind) {
+    case 'fs.resolve':
+      path()
+      if (operation['cwd'] !== undefined) boundedString(operation['cwd'], 'operation cwd', 32 * 1024)
+      return
+    case 'fs.stat':
+      path(); boolean(operation['follow'], 'operation follow'); return
+    case 'fs.read':
+      path(); safeInteger(operation['maxBytes'], 'operation maxBytes', 0, 64 * 1024 * 1024); return
+    case 'fs.list': case 'fs.mkdir': case 'fs.remove':
+      path(); return
+    case 'fs.write':
+      path(); boundedText(operation['dataBase64'], 'operation dataBase64', MAX_RPC_REQUEST_BYTES); return
+    case 'fs.rename':
+      path('from'); path('to'); return
+    case 'process.resolve':
+      boundedString(operation['command'], 'operation command', 32 * 1024)
+      environment(operation['env'], 'operation env')
+      return
+    case 'process.start': {
+      stringArray(operation['argv'], 'operation argv')
+      boundedString(operation['cwd'], 'operation cwd', 32 * 1024)
+      environment(operation['env'], 'operation env')
+      const stdin = operation['stdin']
+      if (stdin !== 'ignore' && stdin !== 'pipe') {
+        const input = record(stdin, 'operation stdin')
+        boundedText(input['data'], 'operation stdin data', MAX_RPC_REQUEST_BYTES)
+      }
+      safeInteger(operation['maximumOutputBytes'], 'operation maximumOutputBytes', 1, MAX_PROCESS_OUTPUT_BYTES)
+      return
+    }
+    case 'process.poll':
+      pid()
+      safeInteger(operation['stdoutOffset'], 'operation stdoutOffset')
+      safeInteger(operation['stderrOffset'], 'operation stderrOffset')
+      return
+    case 'process.stdin':
+      pid(); boundedText(operation['dataBase64'], 'operation dataBase64', MAX_RPC_REQUEST_BYTES)
+      boolean(operation['close'], 'operation close')
+      return
+    case 'process.terminate':
+      pid(); safeInteger(operation['graceMs'], 'operation graceMs', 0, 30_000); return
+    case 'process.list':
+      return
+    case 'terminal.start':
+      stringArray(operation['argv'], 'operation argv')
+      boundedString(operation['cwd'], 'operation cwd', 32 * 1024)
+      environment(operation['env'], 'operation env')
+      safeInteger(operation['rows'], 'operation rows', 1, 1_000)
+      safeInteger(operation['cols'], 'operation cols', 1, 1_000)
+      safeInteger(operation['maximumOutputBytes'], 'operation maximumOutputBytes', 1, MAX_PROCESS_OUTPUT_BYTES)
+      return
+    case 'terminal.poll':
+      pid(); safeInteger(operation['outputOffset'], 'operation outputOffset'); return
+    case 'terminal.input':
+      pid(); boundedText(operation['dataBase64'], 'operation dataBase64', MAX_RPC_REQUEST_BYTES); return
+    case 'terminal.resize':
+      pid(); safeInteger(operation['rows'], 'operation rows', 1, 1_000); safeInteger(operation['cols'], 'operation cols', 1, 1_000); return
+    case 'terminal.signal':
+      pid(); boundedString(operation['signal'], 'operation signal', 32); return
+    case 'terminal.terminate':
+      pid(); return
+    default:
+      throw new TypeError(`execution operation ${JSON.stringify(kind)} is unsupported`)
+  }
 }
 
 export function parseExecutionRequest(value: unknown): ExecutionRequest {
@@ -146,8 +247,7 @@ export function parseExecutionRequest(value: unknown): ExecutionRequest {
     boundedString(authority[key], `authority ${key}`, 200)
   }
   safeInteger(authority['writerFence'], 'writer fence')
-  const operation = record(input['operation'], 'execution operation')
-  boundedString(operation['kind'], 'operation kind', 64)
+  validateOperation(input['operation'])
   return value as ExecutionRequest
 }
 

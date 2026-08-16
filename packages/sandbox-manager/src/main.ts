@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { Pool } from 'pg'
-import { CubeSandboxProvider } from './cube-provider.js'
+import CubeSandboxProvider from './cube-provider.js'
 import { SandboxManager } from './index.js'
 
 async function secret(name: string): Promise<string> {

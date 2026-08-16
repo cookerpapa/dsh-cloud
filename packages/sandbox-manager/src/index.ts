@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { setTimeout as delay } from 'node:timers/promises'
 import { Pool } from 'pg'
 import {
   MAX_RPC_REQUEST_BYTES,
@@ -76,17 +77,18 @@ export class SandboxManager {
   async initialize(): Promise<void> {
     const client = await this.options.pool.connect()
     try {
-      await client.query(`SELECT pg_advisory_lock(hashtextextended($1,0))`, ['dsh_cloud_sandbox_activation:migration'])
-      await client.query(`CREATE TABLE IF NOT EXISTS dsh_cloud_sandbox_schema_state (
+      await client.query(`SELECT pg_advisory_lock(hashtextextended($1,0))`, ['dsh_cloud_sandbox.activations:migration'])
+      await client.query('CREATE SCHEMA IF NOT EXISTS dsh_cloud_sandbox')
+      await client.query(`CREATE TABLE IF NOT EXISTS dsh_cloud_sandbox.schema_state (
         singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
         version integer NOT NULL CHECK (version >= 1)
       )`)
-      const state = await client.query<{ version: number }>('SELECT version FROM dsh_cloud_sandbox_schema_state WHERE singleton=true')
+      const state = await client.query<{ version: number }>('SELECT version FROM dsh_cloud_sandbox.schema_state WHERE singleton=true')
       const version = state.rows[0]?.version ?? 0
       if (version > 1) throw new Error(`Sandbox Manager schema version ${version} is newer than this binary supports`)
       if (version < 1) {
         await client.query(`
-      CREATE TABLE IF NOT EXISTS dsh_cloud_sandbox_activation (
+      CREATE TABLE IF NOT EXISTS dsh_cloud_sandbox.activations (
         namespace text NOT NULL,
         tenant_id text NOT NULL,
         workspace_id text NOT NULL,
@@ -101,12 +103,12 @@ export class SandboxManager {
         PRIMARY KEY (namespace, workspace_id),
         UNIQUE (namespace, activation_id)
       );
-      INSERT INTO dsh_cloud_sandbox_schema_state(singleton,version) VALUES(true,1)
+      INSERT INTO dsh_cloud_sandbox.schema_state(singleton,version) VALUES(true,1)
       ON CONFLICT(singleton) DO UPDATE SET version=EXCLUDED.version
         `)
       }
     } finally {
-      await client.query(`SELECT pg_advisory_unlock(hashtextextended($1,0))`, ['dsh_cloud_sandbox_activation:migration']).catch(() => undefined)
+      await client.query(`SELECT pg_advisory_unlock(hashtextextended($1,0))`, ['dsh_cloud_sandbox.activations:migration']).catch(() => undefined)
       client.release()
     }
   }
@@ -118,16 +120,29 @@ export class SandboxManager {
         return
       }
       if (request.method === 'GET' && request.url === '/metrics') {
-        const metrics = await this.options.pool.query<{ status: string; count: string }>(`SELECT status,count(*)::text AS count FROM dsh_cloud_sandbox_activation WHERE namespace=$1 GROUP BY status`, [this.options.namespace])
+        const metrics = await this.options.pool.query<{ status: string; count: string }>(`SELECT status,count(*)::text AS count FROM dsh_cloud_sandbox.activations WHERE namespace=$1 GROUP BY status`, [this.options.namespace])
         const lines = ['# TYPE dsh_cloud_sandbox_activations gauge',...metrics.rows.map(row => `dsh_cloud_sandbox_activations{state="${row.status}"} ${row.count}`),'']
         const output=Buffer.from(lines.join('\n'));response.writeHead(200,{'content-type':'text/plain; version=0.0.4','content-length':String(output.byteLength)});response.end(output);return
       }
-      if (request.method !== 'POST' || request.url !== '/v1/execute') { send(response, 404, { error: 'not found' }); return }
       const authorization = request.headers.authorization
       if (authorization === undefined || !authorization.startsWith('Bearer ') || !equal(authorization.slice(7), this.options.internalToken)) {
         send(response, 401, { error: 'unauthorized' })
         return
       }
+      if (request.method === 'POST' && request.url === '/v1/workspaces/destroy') {
+        try {
+          const input = await body(request) as Record<string, unknown>
+          if (typeof input['tenantId'] !== 'string' || typeof input['workspaceId'] !== 'string') {
+            throw Object.assign(new Error('Workspace deletion identity is invalid'), { code: 'EINVAL' })
+          }
+          await this.destroyWorkspace(input['tenantId'], input['workspaceId'])
+          send(response, 200, { deleted: true })
+        } catch (error: unknown) {
+          send(response, 409, { error: error instanceof Error ? error.message : 'Workspace deletion failed' })
+        }
+        return
+      }
+      if (request.method !== 'POST' || request.url !== '/v1/execute') { send(response, 404, { error: 'not found' }); return }
       let operationId = 'invalid'
       const controller = new AbortController()
       const abort = (): void => controller.abort()
@@ -146,7 +161,7 @@ export class SandboxManager {
 
   async execute(request: ExecutionRequest, signal?: AbortSignal): Promise<ExecutionResponse> {
     await this.verifyAuthority(request)
-    const resolved = await this.ensureActivation(request)
+    const resolved = await this.ensureActivation(request, signal)
     await this.verifyAuthority(request)
     if (this.mayMutateWorkspace(request)) {
       await this.options.pool.query(`
@@ -160,6 +175,81 @@ export class SandboxManager {
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === 'SANDBOX_UNAVAILABLE') {
         await this.invalidateActivation(request, resolved).catch(() => undefined)
+      }
+      throw error
+    }
+  }
+
+  /** Destroy an empty, control-plane-reserved Workspace and its physical Cube state. */
+  async destroyWorkspace(tenantId: string, workspaceId: string): Promise<void> {
+    if (tenantId.trim().length === 0 || workspaceId.trim().length === 0) {
+      throw Object.assign(new Error('Workspace deletion identity is invalid'), { code: 'EINVAL' })
+    }
+    if (this.options.provider.destroyWorkspace === undefined) {
+      throw new Error('Sandbox provider does not support Workspace deletion')
+    }
+
+    const client = await this.options.pool.connect()
+    let activation: { activationId: string; handle: SandboxHandle } | undefined
+    try {
+      await client.query('BEGIN')
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`${this.options.namespace}:${workspaceId}`])
+      const workspace = await client.query(`
+        SELECT 1 FROM dsh_cloud_control.workspaces workspace
+         WHERE workspace.namespace=$1 AND workspace.tenant_id::text=$2
+           AND workspace.id::text=$3 AND workspace.lifecycle='deleting'
+           AND NOT EXISTS(
+             SELECT 1 FROM dsh_cloud_control.sessions session
+              WHERE session.namespace=workspace.namespace AND session.workspace_id=workspace.id
+           )
+         FOR UPDATE
+      `, [this.options.namespace, tenantId, workspaceId])
+      if (workspace.rowCount !== 1) throw Object.assign(new Error('Workspace is not reserved for deletion'), { code: 'ESTALE' })
+      const found = await client.query<{ activation_id: string; handle_json: SandboxHandle }>(`
+        SELECT activation_id,handle_json FROM dsh_cloud_sandbox.activations
+         WHERE namespace=$1 AND workspace_id=$2 FOR UPDATE
+      `, [this.options.namespace, workspaceId])
+      const row = found.rows[0]
+      if (row !== undefined) {
+        await client.query(`
+          UPDATE dsh_cloud_sandbox.activations SET status='destroying'
+           WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3
+        `, [this.options.namespace, workspaceId, row.activation_id])
+        activation = { activationId: row.activation_id, handle: row.handle_json }
+      }
+      await client.query('COMMIT')
+    } catch (error: unknown) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      throw error
+    } finally {
+      client.release()
+    }
+
+    try {
+      if (activation?.handle.sandboxId !== undefined) {
+        await this.options.provider.destroy(activation.handle)
+      }
+      await this.options.provider.destroyWorkspace({ tenantId, workspaceId })
+      const removed = await this.options.pool.query(`
+        WITH activation AS (
+          DELETE FROM dsh_cloud_sandbox.activations
+           WHERE namespace=$1 AND workspace_id=$3
+        )
+        DELETE FROM dsh_cloud_control.workspaces workspace
+         WHERE workspace.namespace=$1 AND workspace.tenant_id::text=$2
+           AND workspace.id::text=$3 AND workspace.lifecycle='deleting'
+           AND NOT EXISTS(
+             SELECT 1 FROM dsh_cloud_control.sessions session
+              WHERE session.namespace=workspace.namespace AND session.workspace_id=workspace.id
+           )
+      `, [this.options.namespace, tenantId, workspaceId])
+      if (removed.rowCount !== 1) throw Object.assign(new Error('Workspace deletion lost its control-plane reservation'), { code: 'ESTALE' })
+    } catch (error: unknown) {
+      if (activation !== undefined) {
+        await this.options.pool.query(`
+          UPDATE dsh_cloud_sandbox.activations SET status='ready',last_activity_at=now()
+           WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'
+        `, [this.options.namespace, workspaceId, activation.activationId]).catch(() => undefined)
       }
       throw error
     }
@@ -208,32 +298,32 @@ export class SandboxManager {
   async reconcile(idleMilliseconds: number): Promise<{ destroyed: number; missing: number; orphaned: number }> {
     if (!Number.isSafeInteger(idleMilliseconds) || idleMilliseconds < 1_000) throw new TypeError('idle TTL is invalid')
     const candidates = await this.options.pool.query<{ workspace_id: string; activation_id: string; handle_json: SandboxHandle }>(`
-      SELECT workspace_id,activation_id,handle_json FROM dsh_cloud_sandbox_activation
+      SELECT workspace_id,activation_id,handle_json FROM dsh_cloud_sandbox.activations
       WHERE namespace=$1 AND status='ready' AND last_activity_at<now()-make_interval(secs=>$2::double precision/1000)
       ORDER BY last_activity_at LIMIT 100
     `, [this.options.namespace, idleMilliseconds])
     let destroyed = 0; let missing = 0; let orphaned = 0
     for (const candidate of candidates.rows) {
-      const reserved = await this.options.pool.query(`UPDATE dsh_cloud_sandbox_activation SET status='destroying' WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='ready'`, [this.options.namespace, candidate.workspace_id, candidate.activation_id])
+      const reserved = await this.options.pool.query(`UPDATE dsh_cloud_sandbox.activations SET status='destroying' WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='ready'`, [this.options.namespace, candidate.workspace_id, candidate.activation_id])
       if (reserved.rowCount !== 1) continue
       try {
         const state = await this.options.provider.inspect(candidate.handle_json)
         if (state !== 'absent') { await this.options.provider.destroy(candidate.handle_json); destroyed++ } else missing++
-        await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, candidate.workspace_id, candidate.activation_id])
+        await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, candidate.workspace_id, candidate.activation_id])
       } catch (error: unknown) {
-        await this.options.pool.query(`UPDATE dsh_cloud_sandbox_activation SET status='ready',last_activity_at=now() WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, candidate.workspace_id, candidate.activation_id])
+        await this.options.pool.query(`UPDATE dsh_cloud_sandbox.activations SET status='ready',last_activity_at=now() WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, candidate.workspace_id, candidate.activation_id])
         throw error
       }
     }
     const staleCreating = await this.options.pool.query<{ activation_id: string }>(`
-      SELECT activation_id FROM dsh_cloud_sandbox_activation
+      SELECT activation_id FROM dsh_cloud_sandbox.activations
        WHERE namespace=$1 AND status='creating' AND created_at<now()-interval '5 minutes'
     `, [this.options.namespace])
     if (this.options.provider.listManaged !== undefined) {
       const inventory = await this.options.provider.listManaged()
       const records = await this.options.pool.query<{ activation_id: string; sandbox_id: string | null; status: string }>(`
         SELECT activation_id,NULLIF(handle_json->>'sandboxId','') AS sandbox_id,status
-          FROM dsh_cloud_sandbox_activation WHERE namespace=$1
+          FROM dsh_cloud_sandbox.activations WHERE namespace=$1
       `, [this.options.namespace])
       const known = new Map(records.rows.map(row => [row.activation_id, row]))
       const stale = new Set(staleCreating.rows.map(row => row.activation_id))
@@ -246,23 +336,24 @@ export class SandboxManager {
         orphaned++
       }
     }
-    await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1 AND status='creating' AND created_at<now()-interval '5 minutes'`, [this.options.namespace])
+    await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1 AND status='creating' AND created_at<now()-interval '5 minutes'`, [this.options.namespace])
     return { destroyed, missing, orphaned }
   }
 
-  private async ensureActivation(request: ExecutionRequest): Promise<{ handle: SandboxHandle; binding: SandboxBinding }> {
+  private async ensureActivation(request: ExecutionRequest, signal?: AbortSignal): Promise<{ handle: SandboxHandle; binding: SandboxBinding }> {
     const authority = request.authority
     const client = await this.options.pool.connect()
     let create: { activationId: string; binding: SandboxBinding } | undefined
     let replace: { handle: SandboxHandle; activationId: string } | undefined
     let rebind: { handle: SandboxHandle; previous: SandboxBinding; binding: SandboxBinding; activationId: string } | undefined
+    let pending: { activationId: string } | undefined
     try {
       await client.query('BEGIN')
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`${this.options.namespace}:${authority.workspaceId}`])
       const result = await client.query<ActivationRow>(`
         SELECT tenant_id, workspace_id, activation_id, attempt_id, writer_fence, handle_json,
                binding_ciphertext, status
-          FROM dsh_cloud_sandbox_activation
+          FROM dsh_cloud_sandbox.activations
          WHERE namespace = $1 AND workspace_id = $2
          FOR UPDATE
       `, [this.options.namespace, authority.workspaceId])
@@ -271,7 +362,7 @@ export class SandboxManager {
         const activationId = randomUUID()
         const binding = { activationId, secret: randomBytes(32).toString('base64url'), writerFence: authority.writerFence }
         await client.query(`
-          INSERT INTO dsh_cloud_sandbox_activation
+          INSERT INTO dsh_cloud_sandbox.activations
             (namespace, tenant_id, workspace_id, activation_id, attempt_id, writer_fence, handle_json, binding_ciphertext, status)
           VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, 'creating')
         `, [this.options.namespace, authority.tenantId, authority.workspaceId, activationId, authority.attemptId, authority.writerFence, this.encrypt(binding)])
@@ -283,35 +374,42 @@ export class SandboxManager {
         if (authority.writerFence < currentFence || (authority.writerFence === currentFence && row.attempt_id !== authority.attemptId)) {
           throw Object.assign(new Error('execution request carries stale writer authority'), { code: 'ESTALE' })
         }
-        if (row.status !== 'ready') throw Object.assign(new Error('sandbox activation is not ready'), { code: 'EAGAIN' })
-        const handle = row.handle_json
-        const previous = this.decrypt(row.binding_ciphertext)
-        let binding = previous
-        if (authority.writerFence > currentFence) {
+        if (row.status === 'creating' && authority.writerFence === currentFence && row.attempt_id === authority.attemptId) {
+          pending = { activationId: row.activation_id }
+          await client.query('COMMIT')
+        } else if (row.status !== 'ready') {
+          throw Object.assign(new Error('sandbox activation is not ready'), { code: 'EAGAIN' })
+        }
+        if (pending === undefined) {
+          const handle = row.handle_json
+          const previous = this.decrypt(row.binding_ciphertext)
+          let binding = previous
+          if (authority.writerFence > currentFence) {
           const previousAttempt = await client.query<{ status: string }>(`
             SELECT status FROM dsh_cloud_control.run_attempts WHERE namespace=$1 AND id::text=$2
           `, [this.options.namespace, row.attempt_id])
           if (previousAttempt.rows[0]?.status !== 'completed') {
-            await client.query(`UPDATE dsh_cloud_sandbox_activation SET status='destroying' WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3`, [this.options.namespace, authority.workspaceId, row.activation_id])
+            await client.query(`UPDATE dsh_cloud_sandbox.activations SET status='destroying' WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3`, [this.options.namespace, authority.workspaceId, row.activation_id])
             await client.query('COMMIT')
             replace = { handle, activationId: row.activation_id }
           } else {
             binding = { activationId: row.activation_id, secret: randomBytes(32).toString('base64url'), writerFence: authority.writerFence }
             await client.query(`
-            UPDATE dsh_cloud_sandbox_activation
+            UPDATE dsh_cloud_sandbox.activations
                SET status = 'creating'
              WHERE namespace = $1 AND workspace_id = $2
           `, [this.options.namespace, authority.workspaceId])
             rebind = { handle, previous, binding, activationId: row.activation_id }
           }
-        } else {
-          await client.query(`UPDATE dsh_cloud_sandbox_activation SET last_activity_at = now() WHERE namespace = $1 AND workspace_id = $2`, [this.options.namespace, authority.workspaceId])
+          } else {
+            await client.query(`UPDATE dsh_cloud_sandbox.activations SET last_activity_at = now() WHERE namespace = $1 AND workspace_id = $2`, [this.options.namespace, authority.workspaceId])
+          }
+          if (replace === undefined && rebind === undefined) {
+            await client.query('COMMIT')
+            return { handle, binding }
+          }
+          if (rebind !== undefined) await client.query('COMMIT')
         }
-        if (replace === undefined && rebind === undefined) {
-          await client.query('COMMIT')
-          return { handle, binding }
-        }
-        if (rebind !== undefined) await client.query('COMMIT')
       }
     } catch (error: unknown) {
       await client.query('ROLLBACK').catch(() => undefined)
@@ -320,32 +418,34 @@ export class SandboxManager {
 
     if (replace !== undefined) {
       await this.options.provider.destroy(replace.handle).catch(() => undefined)
-      await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, authority.workspaceId, replace.activationId])
-      return this.ensureActivation(request)
+      await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, authority.workspaceId, replace.activationId])
+      return this.ensureActivation(request, signal)
     }
 
     if (rebind !== undefined) {
       try {
         if (await this.options.provider.inspect(rebind.handle) !== 'ready') {
           await this.options.provider.destroy(rebind.handle).catch(() => undefined)
-          await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='creating'`, [this.options.namespace, authority.workspaceId, rebind.activationId])
-          return this.ensureActivation(request)
+          await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='creating'`, [this.options.namespace, authority.workspaceId, rebind.activationId])
+          return this.ensureActivation(request, signal)
         }
         await this.options.provider.bind(rebind.handle, rebind.binding, rebind.previous)
         const finalized = await this.options.pool.query(`
-          UPDATE dsh_cloud_sandbox_activation
+          UPDATE dsh_cloud_sandbox.activations
              SET attempt_id=$4,writer_fence=$5,binding_ciphertext=$6,status='ready',last_activity_at=now()
            WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='creating'
         `, [this.options.namespace, authority.workspaceId, rebind.activationId, authority.attemptId, authority.writerFence, this.encrypt(rebind.binding)])
         if (finalized.rowCount !== 1) throw new Error('sandbox rebind lost ownership')
         return { handle: rebind.handle, binding: rebind.binding }
       } catch (error: unknown) {
-        await this.options.pool.query(`UPDATE dsh_cloud_sandbox_activation SET status='destroying' WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='creating'`, [this.options.namespace, authority.workspaceId, rebind.activationId]).catch(() => undefined)
+        await this.options.pool.query(`UPDATE dsh_cloud_sandbox.activations SET status='destroying' WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='creating'`, [this.options.namespace, authority.workspaceId, rebind.activationId]).catch(() => undefined)
         await this.options.provider.destroy(rebind.handle).catch(() => undefined)
-        await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3`, [this.options.namespace, authority.workspaceId, rebind.activationId]).catch(() => undefined)
+        await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3`, [this.options.namespace, authority.workspaceId, rebind.activationId]).catch(() => undefined)
         throw error
       }
     }
+
+    if (pending !== undefined) return this.waitForActivation(request, pending.activationId, signal)
 
     if (create === undefined) throw new Error('sandbox activation reservation was lost')
     let handle: SandboxHandle | undefined
@@ -353,7 +453,7 @@ export class SandboxManager {
       handle = await this.options.provider.create({ activationId: create.activationId, tenantId: authority.tenantId, workspaceId: authority.workspaceId, writerFence: authority.writerFence })
       await this.options.provider.bind(handle, create.binding)
       const finalized = await this.options.pool.query(`
-        UPDATE dsh_cloud_sandbox_activation
+        UPDATE dsh_cloud_sandbox.activations
            SET handle_json = $4::jsonb, status = 'ready', last_activity_at = now()
          WHERE namespace = $1 AND workspace_id = $2 AND activation_id = $3 AND status = 'creating'
       `, [this.options.namespace, authority.workspaceId, create.activationId, JSON.stringify(handle)])
@@ -361,9 +461,40 @@ export class SandboxManager {
       return { handle, binding: create.binding }
     } catch (error: unknown) {
       if (handle !== undefined) await this.options.provider.destroy(handle).catch(() => undefined)
-      await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace = $1 AND workspace_id = $2 AND activation_id = $3 AND status = 'creating'`, [this.options.namespace, authority.workspaceId, create.activationId])
+      await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace = $1 AND workspace_id = $2 AND activation_id = $3 AND status = 'creating'`, [this.options.namespace, authority.workspaceId, create.activationId])
       throw error
     }
+  }
+
+  private async waitForActivation(
+    request: ExecutionRequest,
+    activationId: string,
+    signal?: AbortSignal,
+  ): Promise<{ handle: SandboxHandle; binding: SandboxBinding }> {
+    const deadline = Date.now() + 180_000
+    while (Date.now() < deadline) {
+      signal?.throwIfAborted()
+      const result = await this.options.pool.query<ActivationRow>(`
+        SELECT tenant_id,workspace_id,activation_id,attempt_id,writer_fence,handle_json,
+               binding_ciphertext,status
+          FROM dsh_cloud_sandbox.activations
+         WHERE namespace=$1 AND workspace_id=$2
+      `, [this.options.namespace, request.authority.workspaceId])
+      const row = result.rows[0]
+      if (row === undefined) return this.ensureActivation(request, signal)
+      if (row.activation_id !== activationId || row.attempt_id !== request.authority.attemptId ||
+          Number(row.writer_fence) !== request.authority.writerFence) {
+        throw Object.assign(new Error('sandbox activation ownership changed while waiting'), { code: 'ESTALE' })
+      }
+      if (row.status === 'ready') {
+        return { handle: row.handle_json, binding: this.decrypt(row.binding_ciphertext) }
+      }
+      if (row.status === 'failed' || row.status === 'destroying') {
+        throw Object.assign(new Error(`sandbox activation entered ${row.status}`), { code: 'SANDBOX_UNAVAILABLE' })
+      }
+      await delay(50, undefined, { signal })
+    }
+    throw Object.assign(new Error('sandbox activation did not become ready before its deadline'), { code: 'ETIMEDOUT' })
   }
 
   private async invalidateActivation(
@@ -371,14 +502,14 @@ export class SandboxManager {
     resolved: { handle: SandboxHandle; binding: SandboxBinding },
   ): Promise<void> {
     const reserved = await this.options.pool.query(`
-      UPDATE dsh_cloud_sandbox_activation
+      UPDATE dsh_cloud_sandbox.activations
          SET status='destroying'
        WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3
          AND writer_fence=$4 AND status='ready'
     `, [this.options.namespace, request.authority.workspaceId, resolved.binding.activationId, resolved.binding.writerFence])
     if (reserved.rowCount !== 1) return
     await this.options.provider.destroy(resolved.handle).catch(() => undefined)
-    await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox_activation WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, request.authority.workspaceId, resolved.binding.activationId])
+    await this.options.pool.query(`DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1 AND workspace_id=$2 AND activation_id=$3 AND status='destroying'`, [this.options.namespace, request.authority.workspaceId, resolved.binding.activationId])
   }
 
   private encrypt(value: SandboxBinding): string {

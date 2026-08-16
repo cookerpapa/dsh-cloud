@@ -13,7 +13,7 @@ import type {
   SubprocessTerminalSignal,
   SubprocessTerminalSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
-import type { CloudExecutionClient } from '@dsh-cloud/execution-client'
+import type CloudExecutionClient from '@dsh-cloud/execution-client'
 import type { RemoteProcessSnapshot, RemoteTerminalSnapshot } from '@dsh-cloud/execution-protocol'
 import type { RunAuthority } from '@dsh-cloud/run-context'
 
@@ -242,7 +242,7 @@ class RemoteTerminal implements SubprocessTerminalHandle {
 }
 
 /** DSH subprocess provider backed by the same remote Cube world as RemoteFileSystem. */
-export class RemoteSubprocessRuntime extends SubprocessRuntime {
+class RemoteSubprocessRuntime extends SubprocessRuntime {
   static inject = ['cloudExecution']
   private readonly live = new Set<RemoteHandle>()
   private readonly terminals = new Set<RemoteTerminal>()

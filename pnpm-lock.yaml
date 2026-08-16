@@ -11,21 +11,9 @@ importers:
       '@dsh-cloud/control-store':
         specifier: workspace:*
         version: link:packages/control-store
-      '@dsh-cloud/execution-agent':
-        specifier: workspace:*
-        version: link:packages/execution-agent
-      '@dsh-cloud/execution-client':
-        specifier: workspace:*
-        version: link:packages/execution-client
       '@dsh-cloud/execution-protocol':
         specifier: workspace:*
         version: link:packages/execution-protocol
-      '@dsh-cloud/fs-remote':
-        specifier: workspace:*
-        version: link:packages/fs-remote
-      '@dsh-cloud/run-admission':
-        specifier: workspace:*
-        version: link:packages/run-admission
       '@dsh-cloud/run-context':
         specifier: workspace:*
         version: link:packages/run-context
@@ -35,18 +23,9 @@ importers:
       '@dsh-cloud/sandbox-manager':
         specifier: workspace:*
         version: link:packages/sandbox-manager
-      '@dsh-cloud/sandbox-remote':
-        specifier: workspace:*
-        version: link:packages/sandbox-remote
       '@dsh-cloud/session-persistence-postgres':
         specifier: workspace:*
         version: link:packages/session-persistence-postgres
-      '@dsh-cloud/subprocess-remote':
-        specifier: workspace:*
-        version: link:packages/subprocess-remote
-      '@dsh-cloud/web-bundle':
-        specifier: workspace:*
-        version: link:packages/cloud-bundle
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -81,9 +60,30 @@ importers:
       '@dsh-cloud/control-store':
         specifier: workspace:*
         version: link:../../packages/control-store
+      '@dsh-cloud/execution-client':
+        specifier: workspace:*
+        version: link:../../packages/execution-client
+      '@dsh-cloud/fs-remote':
+        specifier: workspace:*
+        version: link:../../packages/fs-remote
+      '@dsh-cloud/run-admission':
+        specifier: workspace:*
+        version: link:../../packages/run-admission
+      '@dsh-cloud/run-context':
+        specifier: workspace:*
+        version: link:../../packages/run-context
       '@dsh-cloud/run-queue':
         specifier: workspace:*
         version: link:../../packages/run-queue
+      '@dsh-cloud/sandbox-remote':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-remote
+      '@dsh-cloud/session-persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/session-persistence-postgres
+      '@dsh-cloud/subprocess-remote':
+        specifier: workspace:*
+        version: link:../../packages/subprocess-remote
       '@dsh-cloud/web-bundle':
         specifier: workspace:*
         version: link:../../packages/cloud-bundle
@@ -117,29 +117,7 @@ importers:
         specifier: ^8.18.1
         version: 8.18.1
 
-  packages/cloud-bundle:
-    dependencies:
-      '@dsh-cloud/execution-client':
-        specifier: workspace:*
-        version: link:../execution-client
-      '@dsh-cloud/fs-remote':
-        specifier: workspace:*
-        version: link:../fs-remote
-      '@dsh-cloud/run-admission':
-        specifier: workspace:*
-        version: link:../run-admission
-      '@dsh-cloud/run-context':
-        specifier: workspace:*
-        version: link:../run-context
-      '@dsh-cloud/sandbox-remote':
-        specifier: workspace:*
-        version: link:../sandbox-remote
-      '@dsh-cloud/session-persistence-postgres':
-        specifier: workspace:*
-        version: link:../session-persistence-postgres
-      '@dsh-cloud/subprocess-remote':
-        specifier: workspace:*
-        version: link:../subprocess-remote
+  packages/cloud-bundle: {}
 
   packages/control-store:
     dependencies:

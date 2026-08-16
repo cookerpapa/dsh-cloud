@@ -31,6 +31,7 @@ export class PostgresRunWorker {
   private readonly pollIntervalMs: number
   private readonly maximumAttempts: number
   private readonly attemptLeaseSeconds: number
+  private readonly heartbeatIntervalMs: number
   private controller?: AbortController
   private listener?: Client
   private loop?: Promise<void>
@@ -42,6 +43,7 @@ export class PostgresRunWorker {
     this.pollIntervalMs = positive(options.pollIntervalMs ?? 1000, 'pollIntervalMs')
     this.maximumAttempts = positive(options.maximumAttempts ?? 3, 'maximumAttempts')
     this.attemptLeaseSeconds = positive(options.attemptLeaseSeconds ?? 20, 'attemptLeaseSeconds')
+    this.heartbeatIntervalMs = Math.max(250, Math.min(5_000, Math.floor(this.attemptLeaseSeconds * 1_000 / 3)))
     new URL(options.baseUrl)
   }
 
@@ -126,6 +128,7 @@ export class PostgresRunWorker {
 
   private async execute(run: ClaimedRun, signal: AbortSignal): Promise<void> {
     let promptDurable = false
+    const lease = { nextHeartbeatAt: Date.now() + this.heartbeatIntervalMs }
     try {
       if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
         await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
@@ -136,23 +139,23 @@ export class PostgresRunWorker {
       const promptDeadline = Date.now() + 15_000
       while (!(promptDurable = await this.options.store.promptPersisted(run.runId))) {
         if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
-          await this.cancelAndAwaitSettlement(run, signal)
+          await this.cancelAndAwaitSettlement(run, signal, lease)
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
           return
         }
         if (Date.now() >= promptDeadline) throw Object.assign(new Error('accepted prompt did not become durable'), { code: 'prompt_durability_timeout' })
-        await this.heartbeat(run)
+        await this.heartbeatIfDue(run, lease)
         await delay(50, undefined, { signal })
       }
       await this.options.store.markRunning(run.runId, run.attemptId)
       let outcome = await this.options.store.turnOutcome(run.runId)
       while (outcome === undefined) {
         if (await this.options.store.cancellationRequested(run.runId, run.attemptId)) {
-          await this.cancelAndAwaitSettlement(run, signal)
+          await this.cancelAndAwaitSettlement(run, signal, lease)
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
           return
         }
-        await this.heartbeat(run)
+        await this.heartbeatIfDue(run, lease)
         await delay(250, undefined, { signal })
         outcome = await this.options.store.turnOutcome(run.runId)
       }
@@ -168,7 +171,7 @@ export class PostgresRunWorker {
       try {
         const cancelled = await this.options.store.cancellationRequested(run.runId, run.attemptId)
         if (cancelled && promptDurable) {
-          await this.cancelAndAwaitSettlement(run, signal)
+          await this.cancelAndAwaitSettlement(run, signal, lease)
           await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
         } else if (cancelled) await this.options.store.finishRun(run.runId, run.attemptId, 'cancelled', 'cancelled')
         else if (!promptDurable && await this.options.store.attemptCount(run.runId) < this.maximumAttempts) await this.options.store.requeueBeforeStart(run.runId, run.attemptId, 500)
@@ -183,7 +186,13 @@ export class PostgresRunWorker {
     if (!(await this.options.store.heartbeatAttempt(run.runId, run.attemptId))) throw Object.assign(new Error('RunAttempt lease is stale'), { code: 'ESTALE' })
   }
 
-  private async cancelAndAwaitSettlement(run: ClaimedRun, signal: AbortSignal): Promise<void> {
+  private async heartbeatIfDue(run: ClaimedRun, lease: { nextHeartbeatAt: number }): Promise<void> {
+    if (Date.now() < lease.nextHeartbeatAt) return
+    await this.heartbeat(run)
+    lease.nextHeartbeatAt = Date.now() + this.heartbeatIntervalMs
+  }
+
+  private async cancelAndAwaitSettlement(run: ClaimedRun, signal: AbortSignal, lease: { nextHeartbeatAt: number }): Promise<void> {
     let accepted = false
     while (!(await this.options.store.turnCompleted(run.runId))) {
       if (!accepted) {
@@ -195,7 +204,7 @@ export class PostgresRunWorker {
           this.observe(error)
         }
       }
-      await this.heartbeat(run)
+      await this.heartbeatIfDue(run, lease)
       await delay(250, undefined, { signal })
     }
   }

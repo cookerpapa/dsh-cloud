@@ -37,8 +37,10 @@ jobs:
       - run: pnpm build
       - run: pnpm test
       - run: pnpm test:integration
-      - run: bash -n install.sh deploy/cube/register-template.sh
+      - run: bash -n install.sh deploy/cube/register-template.sh deploy/cube/cube-volume-dsh-cloud-posix.sh
       - run: helm lint deploy/helm/dsh-cloud --set sandbox.cube.templateId=ci-template
+      - name: Build production Worker image
+        run: docker build -f deploy/docker/Dockerfile.services --target worker -t dsh-cloud-worker:ci .
       - name: Validate production Compose
         env:
           POSTGRES_PASSWORD: ci-postgres-password

@@ -117,7 +117,7 @@ export class ControlStore {
       await client.query(`SELECT pg_advisory_lock(hashtextextended($1,0))`, [`${SQL_SCHEMA}:migration`])
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${SQL_SCHEMA}; CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.schema_state(singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),version integer NOT NULL)`)
       const state = await client.query<{ version: number }>(`SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton=true`)
-      if (state.rows[0]?.version === 6) return
+      if (state.rows[0]?.version === 7) return
       if (state.rows[0] !== undefined) throw new Error(`control schema version ${state.rows[0].version} is unsupported; reset this pre-production database`)
       await client.query(`
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.tenants (
@@ -144,6 +144,7 @@ export class ControlStore {
       );
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.workspaces (
         namespace text NOT NULL, id uuid NOT NULL, tenant_id uuid NOT NULL, name text NOT NULL,
+        lifecycle text NOT NULL DEFAULT 'active' CHECK (lifecycle IN ('active','deleting')),
         revision bigint NOT NULL DEFAULT 0, next_fence bigint NOT NULL DEFAULT 0,
         dirty_fence bigint NOT NULL DEFAULT 0,
         created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
@@ -196,7 +197,7 @@ export class ControlStore {
       DROP TRIGGER IF EXISTS notify_run_queue ON ${SQL_SCHEMA}.runs;
       CREATE TRIGGER notify_run_queue AFTER INSERT ON ${SQL_SCHEMA}.runs FOR EACH ROW
         WHEN (NEW.status='queued') EXECUTE FUNCTION ${SQL_SCHEMA}.notify_run_queue();
-      INSERT INTO ${SQL_SCHEMA}.schema_state(singleton,version) VALUES(true,6) ON CONFLICT(singleton) DO UPDATE SET version=excluded.version;
+      INSERT INTO ${SQL_SCHEMA}.schema_state(singleton,version) VALUES(true,7) ON CONFLICT(singleton) DO UPDATE SET version=excluded.version;
       `)
     } finally {
       await client.query(`SELECT pg_advisory_unlock(hashtextextended($1,0))`, [`${SQL_SCHEMA}:migration`]).catch(() => undefined)
@@ -258,10 +259,12 @@ export class ControlStore {
   async ensureDefaultWorkspace(tenantId: string): Promise<{ id: string; name: string }> {
     const result = await this.pool.query<{ id: string; name: string }>(`
       INSERT INTO ${SQL_SCHEMA}.workspaces(namespace,id,tenant_id,name) VALUES($1,$2,$3,'Workspace')
-      ON CONFLICT(namespace,tenant_id,name) DO UPDATE SET name=excluded.name RETURNING id,name
+      ON CONFLICT(namespace,tenant_id,name) DO UPDATE SET name=excluded.name
+      WHERE ${SQL_SCHEMA}.workspaces.lifecycle='active'
+      RETURNING id,name
     `, [this.namespace, randomUUID(), tenantId])
     const row = result.rows[0]
-    if (row === undefined) throw new Error('default workspace was not returned')
+    if (row === undefined) throw Object.assign(new Error('default Workspace is being deleted'), { code: 'EBUSY' })
     return row
   }
 
@@ -271,7 +274,7 @@ export class ControlStore {
         COALESCE(array_agg(session.id ORDER BY session.created_at) FILTER (WHERE session.id IS NOT NULL),'{}') AS session_ids
       FROM ${SQL_SCHEMA}.workspaces workspace LEFT JOIN ${SQL_SCHEMA}.sessions session
         ON session.namespace=workspace.namespace AND session.workspace_id=workspace.id
-      WHERE workspace.namespace=$1 AND workspace.tenant_id=$2
+      WHERE workspace.namespace=$1 AND workspace.tenant_id=$2 AND workspace.lifecycle='active'
       GROUP BY workspace.namespace,workspace.id ORDER BY workspace.created_at,workspace.id
     `, [this.namespace, tenantId])
     return result.rows.map(row => ({ id: row.id, name: row.name, revision: Number(row.revision), sessionIds: row.session_ids, createdAt: row.created_at, updatedAt: row.updated_at }))
@@ -280,18 +283,27 @@ export class ControlStore {
   async renameWorkspace(tenantId: string, workspaceId: string, name: string): Promise<WorkspaceRecord | undefined> {
     const value = name.trim()
     if (value.length === 0 || value.length > 200) throw new TypeError('workspace name is invalid')
-    const updated = await this.pool.query(`UPDATE ${SQL_SCHEMA}.workspaces SET name=$4,updated_at=now() WHERE namespace=$1 AND tenant_id=$2 AND id=$3`, [this.namespace, tenantId, workspaceId, value])
+    const updated = await this.pool.query(`UPDATE ${SQL_SCHEMA}.workspaces SET name=$4,updated_at=now() WHERE namespace=$1 AND tenant_id=$2 AND id=$3 AND lifecycle='active'`, [this.namespace, tenantId, workspaceId, value])
     if (updated.rowCount !== 1) return undefined
     return (await this.listWorkspaces(tenantId)).find(item => item.id === workspaceId)
   }
 
-  async deleteWorkspace(tenantId: string, workspaceId: string): Promise<boolean> {
-    const result = await this.pool.query(`DELETE FROM ${SQL_SCHEMA}.workspaces workspace WHERE namespace=$1 AND tenant_id=$2 AND id=$3 AND NOT EXISTS(SELECT 1 FROM ${SQL_SCHEMA}.sessions session WHERE session.namespace=workspace.namespace AND session.workspace_id=workspace.id)`, [this.namespace, tenantId, workspaceId])
+  /** Reserve an empty Workspace for physical deletion by Sandbox Manager. */
+  async beginWorkspaceDeletion(tenantId: string, workspaceId: string): Promise<boolean> {
+    const result = await this.pool.query(`
+      UPDATE ${SQL_SCHEMA}.workspaces workspace
+         SET lifecycle='deleting',updated_at=now()
+       WHERE namespace=$1 AND tenant_id=$2 AND id=$3 AND lifecycle IN ('active','deleting')
+         AND NOT EXISTS(
+           SELECT 1 FROM ${SQL_SCHEMA}.sessions session
+            WHERE session.namespace=workspace.namespace AND session.workspace_id=workspace.id
+         )
+    `, [this.namespace, tenantId, workspaceId])
     return result.rowCount === 1
   }
 
   async workspaceOwned(tenantId: string, workspaceId: string): Promise<boolean> {
-    const result = await this.pool.query(`SELECT 1 FROM ${SQL_SCHEMA}.workspaces WHERE namespace=$1 AND tenant_id=$2 AND id=$3`, [this.namespace, tenantId, workspaceId])
+    const result = await this.pool.query(`SELECT 1 FROM ${SQL_SCHEMA}.workspaces WHERE namespace=$1 AND tenant_id=$2 AND id=$3 AND lifecycle='active'`, [this.namespace, tenantId, workspaceId])
     return result.rowCount === 1
   }
 
@@ -307,12 +319,16 @@ export class ControlStore {
   }
 
   async registerSession(input: { sessionId: string; tenantId: string; workspaceId: string; preferredWorkerId?: string }): Promise<void> {
-    await this.pool.query(`
+    const result = await this.pool.query(`
       INSERT INTO ${SQL_SCHEMA}.sessions(namespace,id,tenant_id,workspace_id,preferred_worker_id)
-      VALUES($1,$2,$3,$4,$5)
+      SELECT $1,$2,$3,$4,$5
+      FROM ${SQL_SCHEMA}.workspaces workspace
+      WHERE workspace.namespace=$1 AND workspace.id=$4 AND workspace.tenant_id=$3
+        AND workspace.lifecycle='active'
       ON CONFLICT(namespace,id) DO UPDATE SET preferred_worker_id=COALESCE(${SQL_SCHEMA}.sessions.preferred_worker_id,excluded.preferred_worker_id)
       WHERE ${SQL_SCHEMA}.sessions.tenant_id=excluded.tenant_id
     `, [this.namespace, input.sessionId, input.tenantId, input.workspaceId, input.preferredWorkerId ?? null])
+    if (result.rowCount !== 1) throw Object.assign(new Error('Workspace is unavailable for Session registration'), { code: 'ENOENT' })
   }
 
   async ownsSession(tenantId: string, sessionId: string): Promise<boolean> {
@@ -341,23 +357,6 @@ export class ControlStore {
 
   async setWorkerDraining(workerId: string, draining: boolean): Promise<void> {
     await this.pool.query(`UPDATE ${SQL_SCHEMA}.workers SET draining=$3,heartbeat_at=now() WHERE namespace=$1 AND id=$2`, [this.namespace, workerId, draining])
-  }
-
-  async workerLoad(workerId: string): Promise<{ activeRuns: number; maximumRuns: number; draining: boolean }> {
-    const result = await this.pool.query<{ active_runs: number; maximum_runs: number; draining: boolean }>(`
-      SELECT active_runs,maximum_runs,draining FROM ${SQL_SCHEMA}.workers WHERE namespace=$1 AND id=$2
-    `, [this.namespace, workerId])
-    const row = result.rows[0]
-    return row === undefined ? { activeRuns: 0, maximumRuns: 0, draining: true } : { activeRuns: row.active_runs, maximumRuns: row.maximum_runs, draining: row.draining }
-  }
-
-  async healthyWorker(preferredId?: string): Promise<WorkerRecord | undefined> {
-    const result = await this.pool.query<WorkerRow>(`
-      SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
-      WHERE namespace=$1 AND NOT draining AND heartbeat_at>now()-interval '15 seconds' AND active_runs<maximum_runs
-      ORDER BY CASE WHEN id=$2 THEN 0 ELSE 1 END, active_runs::float/maximum_runs, id LIMIT 1
-    `, [this.namespace, preferredId ?? ''])
-    return result.rows[0] === undefined ? undefined : worker(result.rows[0])
   }
 
   async routeWorker(userId: string): Promise<WorkerRecord | undefined> {
@@ -470,7 +469,8 @@ export class ControlStore {
   }
 
   async markDispatched(runId: string, attemptId: string, response: unknown): Promise<void> {
-    await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='dispatched',response_json=$4::jsonb,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='claimed'`, [this.namespace, runId, attemptId, JSON.stringify(response)])
+    const updated = await this.pool.query(`UPDATE ${SQL_SCHEMA}.runs SET status='dispatched',response_json=$4::jsonb,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status='claimed'`, [this.namespace, runId, attemptId, JSON.stringify(response)])
+    if (updated.rowCount !== 1) throw Object.assign(new Error('Run lost writer ownership before dispatch commit'), { code: 'ESTALE' })
     await this.pool.query(`UPDATE ${SQL_SCHEMA}.run_attempts SET heartbeat_at=now() WHERE namespace=$1 AND id=$2 AND run_id=$3`, [this.namespace, attemptId, runId])
   }
 
@@ -563,6 +563,18 @@ export class ControlStore {
     try {
       await client.query('BEGIN')
       const updated = await client.query<{ worker_id: string | null; workspace_id: string; session_id: string; writer_fence: string }>(`UPDATE ${SQL_SCHEMA}.runs SET status=$4,error_code=$5,updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3 AND status IN ('claimed','dispatched','running','cancel_requested') RETURNING worker_id,workspace_id,session_id,writer_fence::text`, [this.namespace, runId, attemptId, status, errorCode ?? null])
+      if (updated.rows[0] === undefined) {
+        const existing = await client.query<{ status: string; current_attempt_id: string | null }>(`
+          SELECT status,current_attempt_id::text FROM ${SQL_SCHEMA}.runs
+           WHERE namespace=$1 AND id=$2
+        `, [this.namespace, runId])
+        const row = existing.rows[0]
+        if (row?.current_attempt_id === attemptId && row.status === status) {
+          await client.query('COMMIT')
+          return
+        }
+        throw Object.assign(new Error('Run terminal commit rejected stale Attempt ownership'), { code: 'ESTALE' })
+      }
       const workerId = updated.rows[0]?.worker_id
       if (workerId !== undefined && workerId !== null) await client.query(`UPDATE ${SQL_SCHEMA}.workers SET active_runs=GREATEST(0,active_runs-1) WHERE namespace=$1 AND id=$2`, [this.namespace, workerId])
       const workspace = updated.rows[0]
@@ -677,6 +689,14 @@ export class ControlStore {
       for (const row of expired.rows) {
         if (row.prompt_persisted) {
           await client.query(`UPDATE ${SQL_SCHEMA}.runs SET status='failed',error_code='worker_lease_expired',updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3`, [this.namespace, row.run_id, row.attempt_id])
+          await client.query(`
+            UPDATE ${SQL_SCHEMA}.workspaces workspace
+               SET revision=revision+1,dirty_fence=0,updated_at=now()
+              FROM ${SQL_SCHEMA}.runs run
+             WHERE run.namespace=$1 AND run.id=$2 AND run.current_attempt_id=$3
+               AND workspace.namespace=run.namespace AND workspace.id=run.workspace_id
+               AND workspace.dirty_fence=run.writer_fence
+          `, [this.namespace, row.run_id, row.attempt_id])
           failed++
         } else {
           await client.query(`UPDATE ${SQL_SCHEMA}.runs SET status='queued',worker_id=NULL,current_attempt_id=NULL,response_json=NULL,available_at=now(),updated_at=now() WHERE namespace=$1 AND id=$2 AND current_attempt_id=$3`, [this.namespace, row.run_id, row.attempt_id])

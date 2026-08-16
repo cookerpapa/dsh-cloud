@@ -25,7 +25,8 @@ import {
 } from '@deepseek-ai/dsh-session-persistence'
 import z from '@deepseek-ai/schemastery'
 import { Pool, type PoolClient } from 'pg'
-import type { CloudRunContext, RunAuthority } from '@dsh-cloud/run-context'
+import type CloudRunContext from '@dsh-cloud/run-context'
+import type { RunAuthority } from '@dsh-cloud/run-context'
 
 const SCHEMA_VERSION = 2
 const SQL_SCHEMA = 'dsh_cloud'
@@ -177,7 +178,7 @@ function scanRows(rows: readonly EventRow[], expectedStart = 0): { events: Sessi
 }
 
 /** PostgreSQL-native implementation of DSH's append-only Session log. */
-export class PostgresSessionPersistence extends SessionPersistence implements PersistenceBackend<number> {
+class PostgresSessionPersistence extends SessionPersistence implements PersistenceBackend<number> {
   static inject = ['sessions']
 
   static Config: z<Config> = z.object({

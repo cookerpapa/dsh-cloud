@@ -1,6 +1,7 @@
 .git
 .data
 .env
+deploy/production/production.env
 **/lib
 **/node_modules
 **/*.tsbuildinfo

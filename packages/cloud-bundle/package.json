@@ -12,14 +12,5 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
-  },
-  "dependencies": {
-    "@dsh-cloud/run-admission": "workspace:*",
-    "@dsh-cloud/execution-client": "workspace:*",
-    "@dsh-cloud/fs-remote": "workspace:*",
-    "@dsh-cloud/run-context": "workspace:*",
-    "@dsh-cloud/sandbox-remote": "workspace:*",
-    "@dsh-cloud/session-persistence-postgres": "workspace:*",
-    "@dsh-cloud/subprocess-remote": "workspace:*"
   }
 }

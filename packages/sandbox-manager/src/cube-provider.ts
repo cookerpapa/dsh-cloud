@@ -45,7 +45,7 @@ function parseJson(bytes: Buffer): unknown {
 }
 
 /** CubeSandbox KVM provider. No Docker/runc fallback exists in this production adapter. */
-export class CubeSandboxProvider implements SandboxProvider {
+class CubeSandboxProvider implements SandboxProvider {
   private readonly apiUrl: string
   private readonly dispatcher: Dispatcher
   private readonly timeoutSeconds: number
@@ -173,7 +173,11 @@ export class CubeSandboxProvider implements SandboxProvider {
   }
 
   async destroyWorkspace(input: Readonly<{ tenantId: string; workspaceId: string }>): Promise<void> {
-    const response = await this.control(`/volumes/${encodeURIComponent(this.volumeId(input.tenantId, input.workspaceId))}`, { method: 'DELETE' }, true)
+    const path = `/volumes/${encodeURIComponent(this.volumeId(input.tenantId, input.workspaceId))}`
+    const existing = await this.control(path, {}, true)
+    await existing.body?.cancel().catch(() => undefined)
+    if (existing.status === 404) return
+    const response = await this.control(path, { method: 'DELETE' }, true)
     await response.body?.cancel().catch(() => undefined)
   }
 
@@ -202,7 +206,6 @@ export class CubeSandboxProvider implements SandboxProvider {
       method: init.method ?? 'GET',
       headers: {
         authorization: `Bearer ${this.options.apiKey}`,
-        'x-api-key': this.options.apiKey,
         ...(init.body === undefined ? {} : { 'content-type': 'application/json' }),
       },
       ...(init.body === undefined ? {} : { body: init.body }),

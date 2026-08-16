@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -70,6 +70,9 @@ integration('Cloud Web profile', () => {
     const repositoryRoot = resolve(import.meta.dirname, '../../..')
     const home = await mkdtemp(join(tmpdir(), 'dsh-cloud-web-'))
     temporaryHomes.push(home)
+    const stalePlugin = join(home, 'profiles', 'node_modules', '@dsh-cloud', 'run-admission')
+    await mkdir(resolve(stalePlugin, '..'), { recursive: true })
+    await symlink('/missing/previous-image/run-admission', stalePlugin)
     const port = await availablePort()
     const child = spawn(process.execPath, [join(repositoryRoot, 'apps/cloud-web/lib/main.js')], {
       cwd: repositoryRoot,
@@ -93,6 +96,7 @@ integration('Cloud Web profile', () => {
     const html = await response.text()
     expect(html).toContain('window.__DSH_BOOT__')
     expect(html).toContain('@deepseek-ai/dsh-client-ui-conversation')
+    expect(await realpath(stalePlugin)).toContain('run-admission')
 
     child.kill('SIGTERM')
     await new Promise<void>(resolvePromise => child.once('exit', () => resolvePromise()))

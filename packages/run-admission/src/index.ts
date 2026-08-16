@@ -13,12 +13,12 @@ declare module '@deepseek-ai/cordis' {
 export interface Config { connectionString: string; namespace?: string }
 
 /** Installs PostgreSQL-issued Run authority around the upstream prompt admission call. */
-export class RunAdmission {
+class RunAdmission {
   static inject = ['apiProxy', 'cloudRunContext']
   static Config: z<Config> = z.object({ connectionString: z.string().required(), namespace: z.string().default('default') })
   private readonly pool: Pool
 
-  constructor(private readonly ctx: Context, config: Config) {
+  constructor(ctx: Context, config: Config) {
     this.pool = new Pool({ connectionString: config.connectionString, max: 5, application_name: 'dsh-cloud-run-admission' })
     const store = new ControlStore(this.pool, config.namespace)
     const prompt: ApiProxy['sessions']['prompt'] = ctx.apiProxy.sessions.prompt.bind(ctx.apiProxy.sessions)

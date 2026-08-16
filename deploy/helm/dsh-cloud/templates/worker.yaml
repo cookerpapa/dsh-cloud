@@ -40,7 +40,7 @@ spec:
             - { name: NO_PROXY, value: {{ .Values.worker.proxy.noProxy | quote }} }
             {{- end }}
           volumeMounts: [{ name: dsh-home, mountPath: /var/lib/dsh }, { name: workspace-stub, mountPath: /workspace }, { name: tmp, mountPath: /tmp }]
-          readinessProbe: { httpGet: { path: /, port: host }, initialDelaySeconds: 10, periodSeconds: 5 }
+          readinessProbe: { httpGet: { path: /metrics, port: metrics }, initialDelaySeconds: 10, periodSeconds: 5 }
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
           resources: {{- toYaml .Values.worker.resources | nindent 12 }}
       volumes: [{ name: dsh-home, emptyDir: {} }, { name: workspace-stub, emptyDir: {} }, { name: tmp, emptyDir: {} }]
@@ -60,10 +60,8 @@ spec:
   scaleTargetRef: { name: {{ .Release.Name }}-worker }
   minReplicaCount: {{ .Values.worker.autoscaling.minReplicas }}
   maxReplicaCount: {{ .Values.worker.autoscaling.maxReplicas }}
-  {{- if eq (int .Values.worker.autoscaling.minReplicas) 0 }}
   pollingInterval: {{ .Values.worker.autoscaling.pollingIntervalSeconds }}
   cooldownPeriod: {{ .Values.worker.autoscaling.cooldownSeconds }}
-  {{- end }}
   triggers:
     - type: postgresql
       metadata:

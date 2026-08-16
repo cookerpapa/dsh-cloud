@@ -1,7 +1,6 @@
 import { constants } from 'node:fs'
 import { access, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { delimiter, dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
-import { PassThrough } from 'node:stream'
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as nodePty from 'node-pty'
 import type {
