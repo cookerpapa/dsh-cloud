@@ -1,0 +1,32 @@
+{
+  "name": "dsh-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24"
+  },
+  "dependencies": {
+    "@dsh-cloud/run-context": "workspace:*",
+    "@dsh-cloud/session-persistence-postgres": "workspace:*",
+    "@dsh-cloud/web-bundle": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "check": "pnpm run build && pnpm run test",
+    "db:down": "docker compose -f deploy/dev/compose.yaml down",
+    "db:up": "docker compose -f deploy/dev/compose.yaml up -d --wait postgres",
+    "dev": "tsx apps/cloud-web/src/main.ts",
+    "start": "node apps/cloud-web/lib/main.js",
+    "test": "vitest run",
+    "test:postgres": "DSH_CLOUD_TEST_DATABASE_URL=postgresql://dsh_cloud:dsh_cloud@127.0.0.1:5438/dsh_cloud vitest run packages/session-persistence-postgres"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  }
+}

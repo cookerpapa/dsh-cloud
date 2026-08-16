@@ -1,0 +1,12 @@
+{
+  "name": "@dsh-cloud/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/main.js",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@dsh-cloud/web-bundle": "workspace:*"
+  }
+}
+

@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: dsh_cloud
+      POSTGRES_USER: dsh_cloud
+      POSTGRES_PASSWORD: dsh_cloud
+    ports:
+      - "127.0.0.1:5438:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dsh_cloud -d dsh_cloud"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - dsh-cloud-postgres:/var/lib/postgresql/data
+
+volumes:
+  dsh-cloud-postgres:
+

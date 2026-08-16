@@ -1,0 +1,17 @@
+{
+  "name": "@dsh-cloud/run-context",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

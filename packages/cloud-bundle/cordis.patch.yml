@@ -1,0 +1,20 @@
+# DSH Cloud overlay for the official dsh-web-app bundle.
+# The local JSONL backend is removed rather than retained as a fallback: a
+# Cloud Host must fail closed when PostgreSQL is unavailable.
+
+- id: session-persistence-jsonl
+  disabled: true
+
+- insert:
+    - id: cloud-run-context
+      name: '@dsh-cloud/run-context'
+
+    - id: session-persistence-postgres
+      name: '@dsh-cloud/session-persistence-postgres'
+      config:
+        connectionString: !!js process.env.DSH_CLOUD_DATABASE_URL
+        namespace: !!js process.env.DSH_CLOUD_NAMESPACE ?? 'local'
+        requireWriterAuthority: false
+        maxPoolSize: 10
+        writeBatchMaxDelayMs: 40
+

@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/run-context" },
+    { "path": "./packages/session-persistence-postgres" },
+    { "path": "./apps/cloud-web" }
+  ]
+}
+

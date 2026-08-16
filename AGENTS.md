@@ -1,0 +1,22 @@
+# DSH Cloud development rules
+
+DSH Cloud is a cloud distribution around the public DeepSeek Harness packages. It is not an AgentDock adapter and it does not copy or fork DSH internals without evidence that a public seam is insufficient.
+
+## Architecture rules
+
+- Prefer an upstream DSH service definition, plugin seam, profile, or bundle before introducing a parallel abstraction.
+- Keep the DSH Agent Loop, model credentials, session state, and orchestration in the trusted plane. User-generated filesystem and subprocess effects belong in an untrusted execution world.
+- PostgreSQL is the authoritative durable session store. A worker-local cache may improve latency but must never be required for correctness.
+- Every mutating cloud operation is tenant/workspace scoped and must reject stale writer authority. Do not claim exactly-once execution for arbitrary shell commands.
+- Model-visible state must come from the DSH Session event log. Transport-only diagnostics do not silently enter model context.
+- The DSH Web UI remains an upstream dependency. Product changes should be implemented as client plugins or profile layers before editing upstream UI code.
+- Use mature open-source infrastructure through a narrow adapter when it fits the contract; do not rebuild queues, schedulers, databases, or sandbox runtimes without a demonstrated gap.
+- This repository is pre-production. Remove obsolete paths instead of preserving compatibility with unreleased local data.
+
+## Change rules
+
+- Keep packages small and role-based. A public abstraction needs a current consumer and a contract test.
+- Add an integration test for every persistence, fencing, or execution-boundary change.
+- Do not log credentials, model payload secrets, database URLs, or raw tenant artifacts.
+- Document the reason for the next milestone, not only its implementation steps.
+
