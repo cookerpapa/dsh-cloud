@@ -6,6 +6,7 @@
   "main": "lib/main.js",
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.0-rc.6",
+    "@dsh-cloud/agent-residency": "workspace:*",
     "@dsh-cloud/control-store": "workspace:*",
     "@dsh-cloud/execution-client": "workspace:*",
     "@dsh-cloud/fs-remote": "workspace:*",

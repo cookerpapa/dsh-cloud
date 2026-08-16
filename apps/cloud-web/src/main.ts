@@ -65,6 +65,7 @@ if (process.env['DSH_CLOUD_DATABASE_URL'] === undefined) {
 
 await mkdir(dshHome, { recursive: true, mode: 0o700 })
 await exposeCloudPlugin('@dsh-cloud/run-context')
+await exposeCloudPlugin('@dsh-cloud/agent-residency')
 await exposeCloudPlugin('@dsh-cloud/run-admission')
 await exposeCloudPlugin('@dsh-cloud/execution-client')
 await exposeCloudPlugin('@dsh-cloud/subprocess-remote')

@@ -8,6 +8,7 @@
     "node": "^22.19.0 || >=24"
   },
   "dependencies": {
+    "@dsh-cloud/agent-residency": "workspace:*",
     "@dsh-cloud/control-store": "workspace:*",
     "@dsh-cloud/execution-protocol": "workspace:*",
     "@dsh-cloud/run-context": "workspace:*",

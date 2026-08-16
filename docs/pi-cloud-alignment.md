@@ -24,6 +24,11 @@ serialize writers per Workspace, treat process memory as disposable, and let a
 replacement Worker recover durable conversation and files without owning a
 permanent per-Session process.
 
+DSH Cloud enforces that last property through DSH's public lifecycle seam:
+ordinary user Agents are flushed and their `AgentHandle` is disposed after
+settlement. Pi and DSH keep different native storage formats, but neither
+depends on retaining one process or routing the next Run back to it.
+
 ## Deliberate DSH-specific choices
 
 ### One native event vocabulary, two retention shapes
@@ -47,14 +52,15 @@ sealed PostgreSQL prefix and indexed live-log suffix form one contiguous native
 log. Valkey is rebuildable. Both live media are Cordis Provider seams, so this
 policy does not embed Kafka or Valkey clients in DSH's Session backend.
 
-### Worker affinity as a transport constraint
+### Shared event outlet over process-local DSH multiplexers
 
-Pi Cloud's shared Event Gateway needs no Worker affinity. The released DSH Host
-event multiplexer is process-local, so Gateway prefers one healthy Worker for a
-user's WebSocket and active Session. PostgreSQL remains authoritative; the
-preference is ignored when that Worker is draining or unhealthy, and the next
-Run can recover on another Worker. It is not a correctness shard or an
-in-memory Session store.
+Both systems avoid durable Worker placement. DSH still exposes a process-local
+Host event multiplexer, so each Gateway aggregates a private downlink from
+every healthy Worker and performs tenant filtering, native-sequence
+deduplication and the durability barrier centrally. The browser subscribes to
+the fleet outlet rather than one Worker. A command aimed at an active Agent may
+use the current RunAttempt owner, but that ephemeral owner never influences
+where the next Run is claimed.
 
 ### Workspace context can activate Cube before an explicit Tool
 
@@ -90,6 +96,11 @@ injecting a second Pi-shaped recovery vocabulary.
 - changed the public Host proxy to a default-deny allowlist plus tenant-checked
   native Session operations;
 - kept Workspace lifecycle APIs available when no Agent Worker is schedulable.
+- removed user/Session Worker preference columns and made the Gateway event
+  channel fleet-wide, allowing consecutive Runs to execute on arbitrary
+  healthy Workers.
+- bounded ordinary Agent residency with the public DSH `AgentHandle`, and held
+  first-Run claims until the native Session log is materialized.
 
 The remaining differences follow from the two Harness contracts rather than
 unfinished migration work.

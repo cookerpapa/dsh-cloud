@@ -14,7 +14,7 @@ function close(server:Server):Promise<void>{return new Promise((resolve,reject)=
 enabled('multi-tenant Cloud Gateway',()=>{
   const namespace=`gateway-${randomUUID()}`
   const pool=new Pool({connectionString,max:10})
-  let fake:Server,fakeSockets:WebSocketServer,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
+  let fake:Server,fakeSockets:WebSocketServer,fakeB:Server,fakeSocketsB:WebSocketServer,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
   const workerOrigins=new Map<string,string|undefined>()
 
   beforeAll(async()=>{
@@ -39,14 +39,19 @@ enabled('multi-tenant Cloud Gateway',()=>{
         }))
       })
     })
+    fakeB=createServer((_,response)=>{response.writeHead(404);response.end()})
+    fakeSocketsB=new WebSocketServer({noServer:true})
+    fakeB.on('upgrade',(request,socket,head)=>fakeSocketsB.handleUpgrade(request,socket,head,()=>undefined))
     const workerPort=await listen(fake)
+    const workerPortB=await listen(fakeB)
     gateway=new CloudGateway({pool,namespace,secureCookies:false,toolBroker:{url:`http://127.0.0.1:${workerPort}`,token:'test-tool-broker-token'}})
     await gateway.initialize()
     await gateway.store.heartbeatWorker({id:'worker-test',baseUrl:`http://127.0.0.1:${workerPort}`,maximumRuns:4})
+    await gateway.store.heartbeatWorker({id:'worker-test-b',baseUrl:`http://127.0.0.1:${workerPortB}`,maximumRuns:4})
     await gateway.listen(0,'127.0.0.1');baseUrl=`http://127.0.0.1:${gateway.address()!.port}`
   })
 
-  afterAll(async()=>{await gateway.close();await new Promise<void>(resolve=>fakeSockets.close(()=>resolve()));await close(fake);await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1',[namespace]);await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1',[namespace]);await pool.end()})
+  afterAll(async()=>{await gateway.close();await new Promise<void>(resolve=>fakeSockets.close(()=>resolve()));await new Promise<void>(resolve=>fakeSocketsB.close(()=>resolve()));await close(fake);await close(fakeB);await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1',[namespace]);await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1',[namespace]);await pool.end()})
 
   test('requires login, creates a tenant and serves the upstream UI',async()=>{
     expect(await (await fetch(baseUrl)).text()).toContain('登录后进入')
@@ -125,11 +130,59 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const client=new WebSocket(url,{headers:{cookie}})
     const frame=await new Promise<{binary:boolean;value:Record<string,unknown>}>((resolve,reject)=>{
       const timeout=setTimeout(()=>reject(new Error('Gateway event frame timed out')),5_000)
-      client.once('message',(data,binary)=>{clearTimeout(timeout);resolve({binary,value:JSON.parse(data.toString()) as Record<string,unknown>})})
+      const onMessage=(data:WebSocket.RawData,binary:boolean):void=>{
+        const value=JSON.parse(data.toString()) as {payload?:{type?:string;sessionId?:string}}
+        if(value.payload?.type!=='session/subscribed'||value.payload.sessionId!==ownedSession)return
+        clearTimeout(timeout);client.off('message',onMessage);resolve({binary,value})
+      }
+      client.on('message',onMessage)
       client.once('error',error=>{clearTimeout(timeout);reject(error)})
     })
     expect(frame.binary).toBe(false)
     expect(frame.value).toMatchObject({payload:{type:'session/subscribed',sessionId:ownedSession}})
+    client.close()
+  })
+
+  test('keeps one browser outlet while live events move between Workers',async()=>{
+    const url=new URL('/api/events.mux',baseUrl);url.protocol='ws:'
+    const client=new WebSocket(url,{headers:{cookie}})
+    await new Promise<void>((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error('initial Worker frame timed out')),5_000)
+      client.once('message',()=>{clearTimeout(timeout);resolve()})
+      client.once('error',reject)
+    })
+    for(const socket of fakeSockets.clients)socket.terminate()
+    await new Promise(resolve=>setTimeout(resolve,100))
+    expect(client.readyState).toBe(WebSocket.OPEN)
+    const moved=new Promise<Record<string,unknown>>((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error('replacement Worker frame timed out')),5_000)
+      client.once('message',data=>{clearTimeout(timeout);resolve(JSON.parse(data.toString()) as Record<string,unknown>)})
+    })
+    for(const socket of fakeSocketsB.clients){
+      socket.send(JSON.stringify({type:'server-request',rpcId:randomUUID(),payload:{type:'host/session-removed',sessionId:ownedSession}}))
+      socket.send(JSON.stringify({type:'server-request',rpcId:randomUUID(),payload:{type:'host/session-status',sessionId:ownedSession,running:true}}))
+    }
+    expect(await moved).toMatchObject({payload:{type:'host/session-status',sessionId:ownedSession,running:true}})
+    client.close()
+  })
+
+  test('adds a newly created Session to an already-open browser outlet',async()=>{
+    const url=new URL('/api/events.mux',baseUrl);url.protocol='ws:'
+    const client=new WebSocket(url,{headers:{cookie}})
+    await new Promise<void>((resolve,reject)=>{client.once('open',()=>resolve());client.once('error',reject)})
+    const allocated=randomUUID()
+    const baseline=new Promise<Record<string,unknown>>((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error('new Session baseline timed out')),5_000)
+      const onMessage=(data:WebSocket.RawData):void=>{
+        const value=JSON.parse(data.toString()) as {payload?:{type?:string;sessionId?:string}}
+        if(value.payload?.type!=='session/subscribed'||value.payload.sessionId!==allocated)return
+        clearTimeout(timeout);client.off('message',onMessage);resolve(value)
+      }
+      client.on('message',onMessage)
+    })
+    const created=await fetch(`${baseUrl}/api/session.create`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.create',payload:{sessionId:allocated}})})
+    expect(await created.json()).toMatchObject({result:{ok:true,value:{sessionId:allocated}}})
+    expect(await baseline).toMatchObject({payload:{type:'session/subscribed',sessionId:allocated}})
     client.close()
   })
 

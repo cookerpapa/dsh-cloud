@@ -20,6 +20,8 @@ The runnable cloud slice provides:
 - public registration/login with tenant-filtered Session and Workspace APIs;
 - a PostgreSQL transactional Run queue with idempotent admission, per-Workspace serialization, fair claims, leases, fencing, cancellation, and crash reconciliation;
 - a horizontally scalable pool of short-lived DSH Agent runs; `LISTEN/NOTIFY` is only a latency hint and polling preserves correctness;
+- bounded process-local Agent residency: after an ordinary user Turn is durably flushed, DSH's public `AgentHandle` is disposed and the next Run resumes through shared SessionPersistence;
+- a shared Gateway event outlet that aggregates every healthy Worker's native downlink, so browser delivery and future Runs do not depend on user/Session placement;
 - projection watermarks that prevent live Session events from reaching a browser before Kafka and Valkey acknowledge them;
 - one stable Cube Volume per tenant Workspace, reattached to replacement KVMs.
 
@@ -32,6 +34,8 @@ Browser (official DSH Web UI)
         |
         v
 Multi-tenant Gateway
+        |\
+        | +---- shared Worker event outlet <---- all healthy Worker downlinks
         |
         +---- PostgreSQL auth / Run queue / sealed Turn segments
         |             ^
@@ -72,7 +76,7 @@ pnpm start
 pnpm start:gateway
 ```
 
-Open `http://127.0.0.1:8080`, register, and use the official DSH UI through the authenticated Gateway. The Worker launcher stores its generated Web profile and other local state under `.data/dsh-home`. Add more Workers with distinct `DSH_CLOUD_WORKER_ID`, `DSH_HOME`, `DSH_CLOUD_PORT`, and `DSH_CLOUD_WORKER_URL`; all replicas compete through PostgreSQL without a second scheduler.
+Open `http://127.0.0.1:8080`, register, and use the official DSH UI through the authenticated Gateway. The Worker launcher stores its generated Web profile and other local state under `.data/dsh-home`. Add more Workers with distinct `DSH_CLOUD_WORKER_ID`, `DSH_HOME`, `DSH_CLOUD_PORT`, and `DSH_CLOUD_WORKER_URL`; all replicas compete through PostgreSQL without a second scheduler or durable Worker placement.
 
 Run the verification suite with:
 
@@ -88,8 +92,8 @@ official frontend. CI runs both gates on every push.
 
 See [the architecture document](docs/architecture.md) for ownership and failure boundaries.
 The [Pi Cloud alignment review](docs/pi-cloud-alignment.md) records which
-cloud invariants are shared and why DSH-specific event persistence and Worker
-transport affinity remain different.
+cloud invariants are shared and why DSH-specific event persistence remains
+different.
 The latest automated, real-model, and Cube KVM results are
 recorded in the [production acceptance report](docs/reports/production-acceptance-latest.md).
 

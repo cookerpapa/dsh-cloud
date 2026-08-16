@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/run-context" },
+    { "path": "./packages/agent-residency" },
     { "path": "./packages/control-store" },
     { "path": "./packages/run-admission" },
     { "path": "./packages/run-queue" },

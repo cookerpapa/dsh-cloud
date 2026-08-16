@@ -21,6 +21,12 @@
     - id: cloud-run-context
       name: '@dsh-cloud/run-context'
 
+    # Ordinary user Agents are process-resident only while active. Once their
+    # turn is durably flushed, dispose the live handle so any healthy Worker can
+    # cold-resume the next Run from the shared native Session log.
+    - id: cloud-agent-residency
+      name: '@dsh-cloud/agent-residency'
+
     - id: cloud-run-admission
       name: '@dsh-cloud/run-admission'
       config:

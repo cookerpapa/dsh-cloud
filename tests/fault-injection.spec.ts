@@ -35,6 +35,18 @@ async function eventually<T>(read: () => Promise<T>, accept: (value: T) => boole
   throw new Error('condition did not become true before its deadline')
 }
 
+async function materializeSession(pool: Pool, namespace: string, sessionId: string): Promise<void> {
+  await pool.query(`
+    INSERT INTO dsh_cloud.persistence_state(namespace,store_id) VALUES($1,$2)
+    ON CONFLICT(namespace) DO NOTHING
+  `, [namespace, randomUUID()])
+  await pool.query(`
+    INSERT INTO dsh_cloud.sessions(namespace,id,header,incarnation,revision,next_seq,sealed_through,projected_through,writer_fence)
+    VALUES($1,$2,$3::jsonb,$4,0,0,-1,-1,0)
+    ON CONFLICT(namespace,id) DO NOTHING
+  `, [namespace, sessionId, JSON.stringify({ version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: Date.now(), cwd: '/workspace' }), randomUUID()])
+}
+
 integration('cloud failure semantics', () => {
   test('rejects tool calls as soon as their RunAttempt lease is stale', async () => {
     const namespace = `fence-${randomUUID()}`
@@ -45,6 +57,7 @@ integration('cloud failure semantics', () => {
     const workspace = await store.createWorkspace(principal.tenantId, 'Fence Workspace')
     const sessionId = randomUUID()
     await store.registerSession({ sessionId, tenantId: principal.tenantId, workspaceId: workspace.id })
+    await materializeSession(pool, namespace, sessionId)
     await store.heartbeatWorker({ id: 'fence-worker', baseUrl: 'http://127.0.0.1:49100', maximumRuns: 1 })
     const rpcId = randomUUID()
     const admitted = await store.enqueueRun({
@@ -115,6 +128,7 @@ integration('cloud failure semantics', () => {
     const workspace = await store.createWorkspace(principal.tenantId, 'Failure Workspace')
     const sessionId = randomUUID()
     await store.registerSession({ sessionId, tenantId: principal.tenantId, workspaceId: workspace.id })
+    await materializeSession(pool, namespace, sessionId)
     await store.heartbeatWorker({ id: 'crashed-worker', baseUrl: 'http://127.0.0.1:49101', maximumRuns: 1 })
 
     const ctx = new Context()
@@ -159,6 +173,7 @@ integration('cloud failure semantics', () => {
     if (claimed.kind !== 'claimed') return
 
     const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id: SessionId(sessionId), createdAt: Date.now(), cwd: '/workspace' }
+    await pool.query('DELETE FROM dsh_cloud.sessions WHERE namespace=$1 AND id=$2', [namespace, sessionId])
     await ctx.sessionPersistence.create(header)
     const authority = {
       tenantId: cloudIdentifier('TenantId', claimed.run.tenantId),
@@ -199,6 +214,7 @@ integration('cloud failure semantics', () => {
     const workspace = await store.createWorkspace(principal.tenantId, 'Cancel Workspace')
     const sessionId = randomUUID()
     await store.registerSession({ sessionId, tenantId: principal.tenantId, workspaceId: workspace.id })
+    await materializeSession(pool, namespace, sessionId)
     const rpcId = randomUUID()
     const request = { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } }
     const admitted = await store.enqueueRun({ tenantId: principal.tenantId, sessionId, clientRpcId: rpcId, idempotencyKey: rpcId, request })
@@ -206,6 +222,7 @@ integration('cloud failure semantics', () => {
     let cancelled = false
     const backend: RunExecutionBackend = {
       async dispatch(run: ClaimedRun): Promise<unknown> {
+        await pool.query('DELETE FROM dsh_cloud.sessions WHERE namespace=$1 AND id=$2', [namespace, sessionId])
         await pool.query(`
           INSERT INTO dsh_cloud.persistence_state(namespace,store_id) VALUES($1,$2)
           ON CONFLICT(namespace) DO NOTHING
@@ -264,11 +281,13 @@ integration('cloud failure semantics', () => {
     const workspace = await store.createWorkspace(principal.tenantId, 'Model Error Workspace')
     const sessionId = randomUUID()
     await store.registerSession({ sessionId, tenantId: principal.tenantId, workspaceId: workspace.id })
+    await materializeSession(pool, namespace, sessionId)
     const rpcId = randomUUID()
     const request = { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } }
     const admitted = await store.enqueueRun({ tenantId: principal.tenantId, sessionId, clientRpcId: rpcId, idempotencyKey: rpcId, request })
     const backend: RunExecutionBackend = {
       async dispatch(run: ClaimedRun): Promise<unknown> {
+        await pool.query('DELETE FROM dsh_cloud.sessions WHERE namespace=$1 AND id=$2', [namespace, sessionId])
         await pool.query(`INSERT INTO dsh_cloud.persistence_state(namespace,store_id) VALUES($1,$2) ON CONFLICT(namespace) DO NOTHING`, [namespace, randomUUID()])
         await pool.query(`
           INSERT INTO dsh_cloud.sessions(namespace,id,header,incarnation,revision,next_seq,writer_fence,writer_attempt_id)

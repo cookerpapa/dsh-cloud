@@ -13,6 +13,19 @@ enabled('PostgreSQL control authority', () => {
   let tenantId = ''
   let workspaceId = ''
 
+  const registerSession = async (input: { sessionId: string; tenantId: string; workspaceId: string }): Promise<void> => {
+    await store.registerSession(input)
+    await pool.query(`
+      INSERT INTO dsh_cloud.persistence_state(namespace,store_id) VALUES($1,$2)
+      ON CONFLICT(namespace) DO NOTHING
+    `, [namespace, randomUUID()])
+    await pool.query(`
+      INSERT INTO dsh_cloud.sessions(namespace,id,header,incarnation,revision,next_seq,sealed_through,projected_through,writer_fence)
+      VALUES($1,$2,$3::jsonb,$4,0,0,-1,-1,0)
+      ON CONFLICT(namespace,id) DO NOTHING
+    `, [namespace, input.sessionId, JSON.stringify({ id: input.sessionId, cwd: '/workspace', createdAt: new Date().toISOString() }), randomUUID()])
+  }
+
   beforeAll(async () => {
     await pool.query(`
       BEGIN;
@@ -64,35 +77,20 @@ enabled('PostgreSQL control authority', () => {
     expect(await store.authenticate(token)).toBeUndefined()
   })
 
-  test('balances new users across healthy Workers while preserving an existing route', async () => {
-    const first = await store.login('owner@example.test', 'correct horse battery staple')
-    // Display names are not identities: different tenants may legitimately choose the same name.
-    const second = await store.register('Tenant A', 'second@example.test', 'correct horse battery staple')
-    const firstWorker = await store.routeWorker(first!.userId)
-    const secondWorker = await store.routeWorker(second.userId)
-    expect(firstWorker?.id).toBeDefined()
-    expect(secondWorker?.id).toBeDefined()
-    expect(secondWorker?.id).not.toBe(firstWorker?.id)
-    expect((await store.routeWorker(first!.userId))?.id).toBe(firstWorker?.id)
-  })
-
-  test('does not herd concurrently registered users onto one Worker', async () => {
-    const users = await Promise.all(Array.from({ length: 8 }, async (_, index) =>
-      store.register(`Concurrent ${index}`, `concurrent-${index}-${randomUUID()}@example.test`, 'correct horse battery staple')))
-    const placements = await Promise.all(users.map(user => store.routeWorker(user.userId)))
-    const counts = new Map<string, number>()
-    for (const placement of placements) {
-      expect(placement?.id).toBeDefined()
-      counts.set(placement!.id, (counts.get(placement!.id) ?? 0) + 1)
-    }
-    expect([...counts.keys()].sort()).toEqual(['worker-a', 'worker-b'])
-    const values = [...counts.values()]
-    expect(Math.max(...values) - Math.min(...values)).toBeLessThanOrEqual(1)
+  test('lists healthy Workers without creating user or Session affinity', async () => {
+    expect((await store.listHealthyWorkers()).map(item => item.id)).toEqual(['worker-a', 'worker-b'])
+    expect((await store.selectWorker())?.id).toBe('worker-a')
+    const columns = await pool.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema='dsh_cloud_control' AND table_name IN ('users','sessions')
+        AND column_name='preferred_worker_id'
+    `)
+    expect(columns.rows).toEqual([])
   })
 
   test('admission is idempotent and tenant scoped', async () => {
     const sessionId = randomUUID()
-    await store.registerSession({ sessionId, tenantId, workspaceId })
+    await registerSession({ sessionId, tenantId, workspaceId })
     const request = { type: 'client-request', rpcId: randomUUID(), method: 'session.prompt', payload: { sessionId } }
     const first = await store.enqueueRun({ tenantId, sessionId, clientRpcId: request.rpcId, idempotencyKey: 'idem-a', request })
     const duplicate = await store.enqueueRun({ tenantId, sessionId, clientRpcId: request.rpcId, idempotencyKey: 'idem-a', request })
@@ -102,12 +100,30 @@ enabled('PostgreSQL control authority', () => {
     expect(await store.requestCancellation(tenantId, first.runId)).toBe(true)
   })
 
+  test('does not claim a new Session before its native log is materialized', async () => {
+    const sessionId = randomUUID()
+    await store.registerSession({ sessionId, tenantId, workspaceId })
+    const rpcId = randomUUID()
+    await store.enqueueRun({
+      tenantId,
+      sessionId,
+      clientRpcId: rpcId,
+      idempotencyKey: `materialization-${rpcId}`,
+      request: { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } },
+    })
+    expect((await store.claimNext('worker-a')).kind).toBe('idle')
+    await registerSession({ sessionId, tenantId, workspaceId })
+    const claimed = await store.claimNext('worker-b')
+    expect(claimed.kind).toBe('claimed')
+    if (claimed.kind === 'claimed') await store.finishRun(claimed.run.runId, claimed.run.attemptId, 'completed')
+  })
+
   test('workers serialize one Session while different Sessions run concurrently', async () => {
     const sessionA = randomUUID()
     const sessionB = randomUUID()
     const workspaceB = (await store.createWorkspace(tenantId, `Other-${sessionB}`)).id
-    await store.registerSession({ sessionId: sessionA, tenantId, workspaceId })
-    await store.registerSession({ sessionId: sessionB, tenantId, workspaceId: workspaceB })
+    await registerSession({ sessionId: sessionA, tenantId, workspaceId })
+    await registerSession({ sessionId: sessionB, tenantId, workspaceId: workspaceB })
     for (const [key, sessionId] of [['a1', sessionA], ['a2', sessionA], ['b1', sessionB]] as const) {
       const rpcId = randomUUID()
       await store.enqueueRun({ tenantId, sessionId, clientRpcId: rpcId, idempotencyKey: key, request: { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } } })
@@ -121,10 +137,11 @@ enabled('PostgreSQL control authority', () => {
     const occupiedSession = first.run.sessionId
     expect((await store.claimNext('worker-a')).kind).toBe('idle')
     await store.finishRun(first.run.runId, first.run.attemptId, 'completed')
-    const next = await store.claimNext('worker-a')
+    const next = await store.claimNext('worker-b')
     expect(next.kind).toBe('claimed')
     if (next.kind === 'claimed') {
       expect(next.run.sessionId).toBe(occupiedSession)
+      expect(next.run.worker.id).toBe('worker-b')
       expect(next.run.writerFence).toBeGreaterThan(first.run.writerFence)
       await store.finishRun(next.run.runId, next.run.attemptId, 'completed')
     }
@@ -135,8 +152,8 @@ enabled('PostgreSQL control authority', () => {
     const sharedWorkspace = (await store.createWorkspace(tenantId, `Shared-${randomUUID()}`)).id
     const firstSession = randomUUID()
     const secondSession = randomUUID()
-    await store.registerSession({ sessionId: firstSession, tenantId, workspaceId: sharedWorkspace })
-    await store.registerSession({ sessionId: secondSession, tenantId, workspaceId: sharedWorkspace })
+    await registerSession({ sessionId: firstSession, tenantId, workspaceId: sharedWorkspace })
+    await registerSession({ sessionId: secondSession, tenantId, workspaceId: sharedWorkspace })
 
     const submit = async (sessionId: string) => {
       const rpcId = randomUUID()
@@ -162,7 +179,7 @@ enabled('PostgreSQL control authority', () => {
 
   test('an expired pre-prompt claim is requeued and releases capacity', async () => {
     const sessionId = randomUUID()
-    await store.registerSession({ sessionId, tenantId, workspaceId, preferredWorkerId: 'worker-a' })
+    await registerSession({ sessionId, tenantId, workspaceId })
     const rpcId = randomUUID()
     await store.enqueueRun({ tenantId, sessionId, clientRpcId: rpcId, idempotencyKey: `expiry-${rpcId}`, request: { type: 'client-request', rpcId, method: 'session.prompt', payload: { sessionId } } })
     const claimed = await store.claimNext('worker-a')
@@ -183,7 +200,7 @@ enabled('PostgreSQL control authority', () => {
 
   test('does not replay a prompt after crossing the dispatch boundary', async () => {
     const sessionId = randomUUID()
-    await store.registerSession({ sessionId, tenantId, workspaceId, preferredWorkerId: 'worker-a' })
+    await registerSession({ sessionId, tenantId, workspaceId })
     const rpcId = randomUUID()
     const admitted = await store.enqueueRun({
       tenantId,
@@ -207,7 +224,7 @@ enabled('PostgreSQL control authority', () => {
   test('settles a dirty Workspace when a post-prompt Worker lease expires', async () => {
     const sessionId = randomUUID()
     const expiredWorkspace = (await store.createWorkspace(tenantId, `Expired-${sessionId}`)).id
-    await store.registerSession({ sessionId, tenantId, workspaceId: expiredWorkspace, preferredWorkerId: 'worker-a' })
+    await registerSession({ sessionId, tenantId, workspaceId: expiredWorkspace })
     const rpcId = randomUUID()
     const admitted = await store.enqueueRun({
       tenantId,
@@ -223,6 +240,9 @@ enabled('PostgreSQL control authority', () => {
     await pool.query(`
       INSERT INTO dsh_cloud.sessions(namespace,id,header,incarnation,revision,next_seq,writer_fence,writer_attempt_id)
       VALUES($1,$2,$3,$4,1,1,$5,$6)
+      ON CONFLICT(namespace,id) DO UPDATE SET
+        header=excluded.header,incarnation=excluded.incarnation,revision=excluded.revision,
+        next_seq=excluded.next_seq,writer_fence=excluded.writer_fence,writer_attempt_id=excluded.writer_attempt_id
     `, [namespace, sessionId, JSON.stringify({ version: 3, id: sessionId, createdAt: Date.now(), cwd: '/workspace' }), randomUUID(), claimed.run.writerFence, claimed.run.attemptId])
     await pool.query(`
       INSERT INTO dsh_cloud.session_event_markers(namespace,session_id,seq,type,rpc_id)
@@ -243,7 +263,7 @@ enabled('PostgreSQL control authority', () => {
 
   test('idle metadata commands receive a fenced, short-lived writer grant', async () => {
     const sessionId = randomUUID()
-    await store.registerSession({ sessionId, tenantId, workspaceId })
+    await registerSession({ sessionId, tenantId, workspaceId })
     const rpcId = randomUUID()
     await store.issueSessionCommand(tenantId, sessionId, rpcId)
     const authority = await store.authorityForRpcId(rpcId)
@@ -256,7 +276,7 @@ enabled('PostgreSQL control authority', () => {
   test('steering joins the active Run authority without invalidating its fence', async () => {
     const sessionId = randomUUID()
     const steeringWorkspace = (await store.createWorkspace(tenantId, `Steering-${sessionId}`)).id
-    await store.registerSession({ sessionId, tenantId, workspaceId: steeringWorkspace })
+    await registerSession({ sessionId, tenantId, workspaceId: steeringWorkspace })
     const promptRpcId = randomUUID()
     await store.enqueueRun({
       tenantId,
@@ -282,7 +302,7 @@ enabled('PostgreSQL control authority', () => {
   test('advances Workspace revision only when the execution world may have mutated it', async () => {
     const sessionId = randomUUID()
     const revisionWorkspace = (await store.createWorkspace(tenantId, `Revision-${sessionId}`)).id
-    await store.registerSession({ sessionId, tenantId, workspaceId: revisionWorkspace })
+    await registerSession({ sessionId, tenantId, workspaceId: revisionWorkspace })
     const submit = async (suffix: string) => {
       const rpcId = randomUUID()
       await store.enqueueRun({

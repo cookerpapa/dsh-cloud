@@ -33,7 +33,7 @@ table or PostgreSQL event Outbox in this path.
 ## Automated verification
 
 - all TypeScript project references build with unused local/parameter checks;
-- 50 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
+- 52 PostgreSQL/service integration cases pass against real PostgreSQL, Kafka
   and Valkey services;
 - the tests cover native Session reconstruction, fixed-window group commit,
   segment digest verification, stale fences, ambiguous prompt dispatch,
@@ -42,9 +42,11 @@ table or PostgreSQL event Outbox in this path.
   rebuild, WebSocket text framing and failure injection;
 - a fresh two-Worker boot validates concurrent schema initialization; the
   migration path serializes initialization with a PostgreSQL advisory lock;
-- eight concurrent cold user placements verify that first-time affinity is
-  serialized and balanced instead of herding a registration burst onto the
-  same Worker;
+- the current control-schema tests verify that users and Sessions contain no
+  Worker-placement column and consecutive Runs can be claimed by different
+  Workers;
+- first-Run admission waits for DSH-native Session materialization, and the
+  Cloud profile disposes settled ordinary Agent handles before cold recovery;
 - Helm lint/render, production Compose rendering, shell syntax and whitespace
   checks pass.
 
@@ -74,6 +76,36 @@ An additional two-Turn coding acceptance during the same migration exercised
 warm Cube reuse. The first Turn created and tested insertion sort; the second
 Turn read the retained file, added a deterministic 100-element test and ran it
 again. Both completed against the real model and the same Workspace activation.
+
+The no-affinity build was then exercised as one three-Turn coding Session while
+alternately removing the prior Worker from service. Turn 1 ran on Worker 2 and
+created/tested insertion sort; Turn 2 ran on Worker 1, recovered the same
+Session and Workspace, retained that file and added/tested binary search; Turn
+3 returned to Worker 2, recovered both earlier files, added a README and reran
+all tests. Every Turn completed through the real DeepSeek and Cube KVM path.
+
+| Cross-Worker Session measure | Result |
+| --- | --- |
+| Worker sequence | Worker 2 -> Worker 1 -> Worker 2 |
+| writer fences | 1 -> 2 -> 3 |
+| terminal states | 3 completed, 0 failed |
+| client durations | 67.9 s / 73.6 s / 82.9 s |
+| final native Session position | revision 51, next seq 4,222 |
+| retained Workspace result | insertion sort, binary search and README; both test suites passed |
+
+The control schema contained zero `preferred_worker_id` columns. This is a
+forced cross-process recovery result, not load balancing that happened to pick
+different Workers.
+
+A second handoff pair kept both Worker processes alive. Capacity was used only
+to force deterministic placement: Worker 1 created `handoff.txt` with a unique
+marker and completed Fence 4; Worker 2 then claimed Fence 5, directly read that
+file without recreating it, listed all prior Workspace files, and accurately
+explained from native Session history why the previous Turn had created the
+marker. The pair completed in 51.3 s and 50.7 s. The Session finished at
+revision 79 / next seq 5,097. This specifically verifies that a settled live
+Agent was disposed and later cold-resumed on another still-running Worker,
+rather than relying on process restart to clear stale memory.
 
 The final source was then rebuilt into a second isolated deployment and tested
 as six new users starting at the same time. Every user registered through the
@@ -187,5 +219,5 @@ the messaging and relational stores had substantial headroom in this test.
   dispatch may have started, a Run is not blindly replayed after an ambiguous
   transport failure.
 - Valkey is currently a rebuildable projection and visibility gate. Browser
-  frames still travel over the existing authenticated Worker Control Channel;
-  Valkey is not yet the browser replay transport.
+  frames travel through Gateway's shared fleet outlet over private Worker
+  downlinks; Valkey is not yet the browser replay transport.

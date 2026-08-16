@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { Pool, type PoolClient } from 'pg'
-import WebSocket, { WebSocketServer, type RawData } from 'ws'
+import { WebSocketServer } from 'ws'
 import { ControlStore, type Principal, type WorkerRecord } from '@dsh-cloud/control-store'
 import { loginPage } from './login.js'
+import { WorkerEventHub, type WorkerEventPath } from './worker-event-hub.js'
 
 const MAX_BODY_BYTES = 160 * 1024 * 1024
 const AUTH_COOKIE = 'dsh_cloud_session'
@@ -92,12 +93,14 @@ export class CloudGateway {
   readonly store: ControlStore
   private readonly server: Server
   private readonly sockets = new WebSocketServer({ noServer: true })
+  private readonly eventHub: WorkerEventHub
   private projectionClient: PoolClient | undefined
   private readonly projectionWaiters = new Map<string, Set<() => void>>()
 
   constructor(private readonly options: GatewayOptions) {
     if(options.eventProjectionTimeoutMs!==undefined&&(!Number.isSafeInteger(options.eventProjectionTimeoutMs)||options.eventProjectionTimeoutMs<1_000||options.eventProjectionTimeoutMs>300_000))throw new TypeError('eventProjectionTimeoutMs is invalid')
     this.store=new ControlStore(options.pool,options.namespace)
+    this.eventHub=new WorkerEventHub(this.store,(sessionId,seq,watermarks)=>this.waitDurable(sessionId,seq,watermarks))
     this.server=createServer((request,response)=>void this.handle(request,response).catch(error=>this.fail(response,error)))
     this.server.on('upgrade',(request,socket,head)=>void this.upgrade(request,socket,head))
   }
@@ -121,6 +124,7 @@ export class CloudGateway {
   address():{address:string;port:number}|undefined{const value=this.server.address();return value!==null&&typeof value==='object'?{address:value.address,port:value.port}:undefined}
   async close():Promise<void>{
     for(const socket of this.sockets.clients)socket.terminate()
+    await this.eventHub.close()
     for(const waiters of this.projectionWaiters.values())for(const wake of waiters)wake()
     this.projectionWaiters.clear()
     if(this.projectionClient!==undefined){await this.projectionClient.query('UNLISTEN dsh_cloud_session_projection').catch(()=>undefined);this.projectionClient.release();this.projectionClient=undefined}
@@ -171,7 +175,7 @@ export class CloudGateway {
       return
     }
     if(request.method!=='GET'&&request.method!=='HEAD'){json(response,405,{error:'method not allowed'});return}
-    const worker=await this.store.routeWorker(principal.userId)
+    const worker=await this.store.selectWorker()
     if(worker===undefined){json(response,503,{error:'no healthy DSH Worker'});return}
     await this.proxy(worker,request,response,await bytes(request))
   }
@@ -183,19 +187,20 @@ export class CloudGateway {
     if(path!==`/api/${envelope.method}`){rpcError(response,envelope,'bad-request','RPC method does not match its HTTP route',400);return}
     if(envelope.method.startsWith('workspace.')){await this.workspace(response,principal,envelope);return}
     if(envelope.method==='host.listDirectory'||envelope.method==='host.createDirectory'){this.cloudDirectory(response,envelope);return}
-    const worker=await this.store.routeWorker(principal.userId)
-    if(worker===undefined){rpcError(response,envelope,'internal','No healthy DSH Worker is available',503);return}
-    if(envelope.method==='settings.describe'||envelope.method==='settings.mutate'){await this.cloudSettings(response,principal,worker,envelope,request);return}
     const sid=sessionId(envelope)
     if(SESSION_METHODS.has(envelope.method)&&(sid===undefined||!await this.store.ownsSession(principal.tenantId,sid))){rpcError(response,envelope,'session-not-found','Session was not found');return}
     if(envelope.method==='session.prompt'){
-      await this.store.preferSessionWorker(principal.tenantId,sid!,worker.id)
       const enqueued=await this.store.enqueueRun({tenantId:principal.tenantId,sessionId:sid!,clientRpcId:envelope.rpcId,idempotencyKey:String(request.headers['idempotency-key']??envelope.rpcId),request:envelope})
       rpc(response,envelope,{accepted:true,runId:enqueued.runId});return
     }
     if(envelope.method==='session.cancel'){await this.store.requestSessionCancellation(principal.tenantId,sid!);rpc(response,envelope,{accepted:true});return}
     if(envelope.method==='session.rename'||envelope.method==='session.selectModel')await this.store.issueSessionCommand(principal.tenantId,sid!,envelope.rpcId)
     if(envelope.method==='session.updateQueue')await this.store.issueSessionCommand(principal.tenantId,sid!,envelope.rpcId,true)
+    const worker=sid===undefined
+      ?await this.store.selectWorker()
+      :(await this.store.activeRunWorker(principal.tenantId,sid))??await this.store.selectWorker()
+    if(worker===undefined){rpcError(response,envelope,'internal','No healthy DSH Worker is available',503);return}
+    if(envelope.method==='settings.describe'||envelope.method==='settings.mutate'){await this.cloudSettings(response,principal,worker,envelope,request);return}
     if(envelope.method==='session.create'){
       const requested=typeof envelope.payload['workspaceId']==='string'&&await this.store.workspaceOwned(principal.tenantId,envelope.payload['workspaceId'])?envelope.payload['workspaceId']:undefined
       const workspaceId=requested??(await this.store.ensureDefaultWorkspace(principal.tenantId)).id
@@ -203,13 +208,19 @@ export class CloudGateway {
       const forwarded:Envelope={...envelope,payload:{...envelope.payload,sessionId:allocated,cwd:'/workspace'}};delete forwarded.payload['workspaceId']
       const upstream=await this.fetchWorker(worker,path,request,Buffer.from(JSON.stringify(forwarded)))
       const payload=await upstream.json();const value=okValue(payload)
-      if(value!==undefined&&typeof value['sessionId']==='string'){await this.store.registerSession({sessionId:value['sessionId'],tenantId:principal.tenantId,workspaceId,preferredWorkerId:worker.id})}
+      if(value!==undefined&&typeof value['sessionId']==='string'){
+        await this.store.registerSession({sessionId:value['sessionId'],tenantId:principal.tenantId,workspaceId})
+        this.eventHub.allowSession(principal.tenantId,value['sessionId'])
+      }
       json(response,upstream.status,payload);return
     }
     if(envelope.method==='session.fork'){
-      const placement=await this.store.sessionPlacement(principal.tenantId,sid!)
+      const workspace=await this.store.sessionWorkspace(principal.tenantId,sid!)
       const upstream=await this.fetchWorker(worker,path,request,body);const payload=await upstream.json();const value=okValue(payload)
-      if(placement!==undefined&&value!==undefined&&typeof value['sessionId']==='string'){await this.store.registerSession({sessionId:value['sessionId'],tenantId:principal.tenantId,workspaceId:placement.workspaceId,preferredWorkerId:worker.id})}
+      if(workspace!==undefined&&value!==undefined&&typeof value['sessionId']==='string'){
+        await this.store.registerSession({sessionId:value['sessionId'],tenantId:principal.tenantId,workspaceId:workspace.workspaceId})
+        this.eventHub.allowSession(principal.tenantId,value['sessionId'])
+      }
       json(response,upstream.status,payload);return
     }
     if(envelope.method==='session.list'||envelope.method==='session.search'){
@@ -329,34 +340,9 @@ export class CloudGateway {
       if(!this.sameOrigin(request))throw new Error('origin rejected')
       const principal=await this.principal(request);if(principal===undefined)throw new Error('unauthorized')
       const path=new URL(request.url??'/','http://gateway').pathname;if(path!=='/api/events.mux'&&path!=='/api/events.host')throw new Error('unknown websocket')
-      const worker=await this.store.routeWorker(principal.userId);if(worker===undefined)throw new Error('no worker')
       const allowed=await this.store.listSessionIds(principal.tenantId)
-      const url=new URL(worker.baseUrl);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname=path
-      const upstream=new WebSocket(url)
-      const buffered:Array<{data:RawData;binary:boolean}>=[]
-      let bufferedBytes=0
-      let forward:((data:RawData,binary:boolean)=>void)|undefined
-      upstream.on('message',(data,binary)=>{
-        if(forward!==undefined){forward(data,binary);return}
-        bufferedBytes+=data instanceof ArrayBuffer?data.byteLength:Array.isArray(data)?data.reduce((sum,item)=>sum+item.byteLength,0):data.byteLength
-        if(buffered.length>=256||bufferedBytes>1024*1024){upstream.close(1013,'upstream startup buffer exceeded');return}
-        buffered.push({data,binary})
-      })
-      await new Promise<void>((resolve,reject)=>{
-        const timer=setTimeout(()=>reject(new Error('worker event stream did not open')),10_000)
-        const opened=()=>{clearTimeout(timer);upstream.off('error',failed);upstream.off('close',closed);resolve()}
-        const failed=(error:Error)=>{clearTimeout(timer);upstream.off('open',opened);upstream.off('close',closed);reject(error)}
-        const closed=()=>{clearTimeout(timer);upstream.off('open',opened);upstream.off('error',failed);reject(new Error('worker event stream closed during startup'))}
-        upstream.once('open',opened);upstream.once('error',failed);upstream.once('close',closed)
-      })
-      if(socket.destroyed){upstream.close();return}
       this.sockets.handleUpgrade(request,socket,head,browser=>{
-        const durableWatermark=new Map<string,number>()
-        let delivery=Promise.resolve()
-        forward=(data,isBinary)=>{delivery=delivery.then(async()=>{if(isBinary||browser.readyState!==WebSocket.OPEN)return;try{const value=JSON.parse(data.toString()) as Record<string,unknown>;const payload=value['payload'] as Record<string,unknown>|undefined;const sid=payload&&typeof payload['sessionId']==='string'?payload['sessionId']:undefined;if(sid!==undefined&&!allowed.has(sid)){if(await this.store.ownsSession(principal.tenantId,sid))allowed.add(sid);else return}const type=String(payload?.['type']??'');if(type==='host/remote-event'||type.startsWith('host/workspace-')||type==='host/archived-sessions-changed')return;if(payload?.['type']==='session/event'&&sid!==undefined){const event=payload['event'] as Record<string,unknown>|undefined;if(event===undefined||!Number.isSafeInteger(event['seq']))return;await this.waitDurable(sid,event['seq'] as number,durableWatermark)}browser.send(data,{binary:false})}catch{browser.close(1011,'durability barrier failed')}})}
-        for(const item of buffered)forward(item.data,item.binary)
-        buffered.length=0
-        upstream.on('close',()=>browser.close());upstream.on('error',()=>browser.close(1011,'upstream unavailable'));browser.on('close',()=>upstream.close());browser.on('message',()=>browser.close(1008,'downlink only'))
+        this.eventHub.subscribe(path as WorkerEventPath,principal.tenantId,allowed,browser)
       })
     }catch{if(!socket.destroyed)socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 9\r\n\r\nforbidden')}
   }

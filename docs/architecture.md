@@ -20,6 +20,10 @@ DSH Cloud therefore depends on released DSH packages and adds a Cloud profile. U
 
 DSH Session events, not browser deltas or a reconstructed `messages[]`, are the conversation authority. A Worker may resume a Session on another machine by loading those events through the official persistence seam.
 
+This document, the root README and `docs/pi-cloud-alignment.md` describe the
+current topology. Historical reports record what a particular build measured;
+they do not reintroduce components or routing rules removed from mainline.
+
 ## Run scheduling
 
 PostgreSQL is the only Run authority. Admission inserts an idempotent queued
@@ -38,13 +42,42 @@ PostgreSQL owns product state, so adding another durable workflow history would
 duplicate retry and ownership semantics without removing the need for fenced
 Session and Workspace commits.
 
-The released DSH Web event multiplexer is process-local. While a Worker is
-healthy, Gateway therefore keeps a user's browser channel and that Session's
-Runs on the same Worker. This is transport affinity, not a state authority:
-Session events and Run state remain in PostgreSQL, and a dead or draining
-Worker is replaced before the next request. A future shared event gateway can
-remove this routing constraint without changing SessionPersistence or the Run
-queue.
+There is no durable user, Session, or Workspace placement on a Worker. Every
+healthy Worker competes for every eligible queued Run; tenant fairness,
+same-Session ordering and the single Workspace writer rule are enforced by the
+shared PostgreSQL claim transaction. `runs.worker_id` and
+`run_attempts.worker_id` identify only the current Attempt owner and are
+cleared or superseded when ownership ends.
+
+DSH's upstream API resolver normally reuses a live process-local Agent, which
+is useful for a single-host Web UI but cannot be the continuity mechanism of an
+arbitrary-Worker pool. The Cloud profile therefore captures DSH's public
+`AgentHandle`. After an ordinary user Agent reaches idle, its Session is
+explicitly flushed and the handle is disposed; a short grace period protects
+session creation and immediate same-process wakeups. Subagent handles remain
+under DSH's own continuation manager. The next user Run may land on any Worker
+and resumes from the shared native Session log. This bounds Worker memory and
+prevents an old Worker from later reusing a stale in-memory context.
+
+A newly created control-plane Session is not claimable until its DSH-native
+Session row has materialized. This closes the race in which `session.create`
+returns before the asynchronous persistence batch becomes visible to a
+different Worker.
+
+The released DSH Web event multiplexer is process-local, so each Gateway keeps
+one private upstream downlink to every healthy Worker that currently has a
+browser subscriber. Gateway merges those downlinks into one tenant-filtered
+browser outlet. A Worker disconnect removes only that source; it does not close
+the browser socket, and a later Run may execute on any other Worker. Session
+events are deduplicated by their native sequence and still wait for the shared
+Kafka/Valkey/PostgreSQL durability watermark before browser visibility.
+Process-local `host/session-added` and `host/session-removed` frames are not
+forwarded: Agent residency changes are not cloud conversation creation or
+deletion. PostgreSQL ownership and explicit product APIs own that lifecycle.
+
+An operation that must affect an already-running in-memory Agent, such as a
+steer/update-queue request, is routed to the current RunAttempt owner. This is a
+lookup of live ownership, not a remembered route for the next Run.
 
 DSH Host remains bound to the Worker's loopback interface. DSH deliberately
 rejects a public bind because the Host API controls Agent execution. A
@@ -115,8 +148,8 @@ the platform may already have deleted its bytes.
 
 ## Browser durability
 
-The official DSH Worker emits fine-grained Session events. Before Gateway
-forwards a `session/event` frame, it verifies that the durable live projection
+The official DSH Workers emit fine-grained Session events into Gateway's shared
+fleet outlet. Before Gateway forwards a `session/event` frame, it verifies that the durable live projection
 has advanced through that event sequence. The upstream persistence coordinator
 first coalesces adjacent events into a bounded batch. The production
 `SessionPersistence` plugin sends the exact native batch to the injected

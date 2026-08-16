@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@dsh-cloud/agent-residency':
+        specifier: workspace:*
+        version: link:packages/agent-residency
       '@dsh-cloud/control-store':
         specifier: workspace:*
         version: link:packages/control-store
@@ -69,6 +72,9 @@ importers:
       '@deepseek-ai/dsh':
         specifier: 0.1.0-rc.6
         version: 0.1.0-rc.6(cdc8f2a8de2f253bf4b970ad7eada1b6)
+      '@dsh-cloud/agent-residency':
+        specifier: workspace:*
+        version: link:../../packages/agent-residency
       '@dsh-cloud/control-store':
         specifier: workspace:*
         version: link:../../packages/control-store
@@ -134,6 +140,21 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+
+  packages/agent-residency:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-agent':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(b0514d7a320728b6d8f5a31eb3960e10)
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
 
   packages/cloud-bundle: {}
 

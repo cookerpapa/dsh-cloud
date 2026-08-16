@@ -122,7 +122,7 @@ export class ControlStore {
       await client.query(`SELECT pg_advisory_lock(hashtextextended($1,0))`, [`${SQL_SCHEMA}:migration`])
       await client.query(`CREATE SCHEMA IF NOT EXISTS ${SQL_SCHEMA}; CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.schema_state(singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),version integer NOT NULL)`)
       const state = await client.query<{ version: number }>(`SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton=true`)
-      if (state.rows[0]?.version === 7) {
+      if (state.rows[0]?.version === 8) {
         await this.ensureUserPreferences(client)
         return
       }
@@ -136,7 +136,6 @@ export class ControlStore {
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.users (
         namespace text NOT NULL, id uuid NOT NULL, tenant_id uuid NOT NULL, email text NOT NULL,
         password_hash text NOT NULL, role text NOT NULL CHECK (role IN ('admin', 'member')),
-        preferred_worker_id text,
         created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (namespace, id),
         UNIQUE (namespace, email), FOREIGN KEY (namespace, tenant_id) REFERENCES ${SQL_SCHEMA}.tenants(namespace, id) ON DELETE CASCADE
       );
@@ -161,7 +160,7 @@ export class ControlStore {
       );
       CREATE TABLE IF NOT EXISTS ${SQL_SCHEMA}.sessions (
         namespace text NOT NULL, id text NOT NULL, tenant_id uuid NOT NULL, workspace_id uuid NOT NULL,
-        preferred_worker_id text, created_at timestamptz NOT NULL DEFAULT now(),
+        created_at timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY (namespace, id),
         FOREIGN KEY (namespace, tenant_id) REFERENCES ${SQL_SCHEMA}.tenants(namespace, id) ON DELETE CASCADE,
         FOREIGN KEY (namespace, workspace_id) REFERENCES ${SQL_SCHEMA}.workspaces(namespace, id) ON DELETE RESTRICT
@@ -205,7 +204,7 @@ export class ControlStore {
       DROP TRIGGER IF EXISTS notify_run_queue ON ${SQL_SCHEMA}.runs;
       CREATE TRIGGER notify_run_queue AFTER INSERT ON ${SQL_SCHEMA}.runs FOR EACH ROW
         WHEN (NEW.status='queued') EXECUTE FUNCTION ${SQL_SCHEMA}.notify_run_queue();
-      INSERT INTO ${SQL_SCHEMA}.schema_state(singleton,version) VALUES(true,7) ON CONFLICT(singleton) DO UPDATE SET version=excluded.version;
+      INSERT INTO ${SQL_SCHEMA}.schema_state(singleton,version) VALUES(true,8) ON CONFLICT(singleton) DO UPDATE SET version=excluded.version;
       `)
       await this.ensureUserPreferences(client)
     } finally {
@@ -350,27 +349,23 @@ export class ControlStore {
     return result.rowCount === 1
   }
 
-  async sessionPlacement(tenantId: string, sessionId: string): Promise<{ workspaceId: string; preferredWorkerId?: string } | undefined> {
-    const result = await this.pool.query<{ workspace_id: string; preferred_worker_id: string | null }>(`SELECT workspace_id,preferred_worker_id FROM ${SQL_SCHEMA}.sessions WHERE namespace=$1 AND tenant_id=$2 AND id=$3`, [this.namespace, tenantId, sessionId])
+  async sessionWorkspace(tenantId: string, sessionId: string): Promise<{ workspaceId: string } | undefined> {
+    const result = await this.pool.query<{ workspace_id: string }>(`SELECT workspace_id FROM ${SQL_SCHEMA}.sessions WHERE namespace=$1 AND tenant_id=$2 AND id=$3`, [this.namespace, tenantId, sessionId])
     const row = result.rows[0]
-    return row === undefined ? undefined : { workspaceId: row.workspace_id, ...(row.preferred_worker_id === null ? {} : { preferredWorkerId: row.preferred_worker_id }) }
+    return row === undefined ? undefined : { workspaceId: row.workspace_id }
   }
 
-  async preferSessionWorker(tenantId: string, sessionId: string, workerId: string): Promise<boolean> {
-    const result = await this.pool.query(`UPDATE ${SQL_SCHEMA}.sessions SET preferred_worker_id=$4 WHERE namespace=$1 AND tenant_id=$2 AND id=$3`, [this.namespace, tenantId, sessionId, workerId])
-    return result.rowCount === 1
-  }
-
-  async registerSession(input: { sessionId: string; tenantId: string; workspaceId: string; preferredWorkerId?: string }): Promise<void> {
+  async registerSession(input: { sessionId: string; tenantId: string; workspaceId: string }): Promise<void> {
     const result = await this.pool.query(`
-      INSERT INTO ${SQL_SCHEMA}.sessions(namespace,id,tenant_id,workspace_id,preferred_worker_id)
-      SELECT $1,$2,$3,$4,$5
+      INSERT INTO ${SQL_SCHEMA}.sessions(namespace,id,tenant_id,workspace_id)
+      SELECT $1,$2,$3,$4
       FROM ${SQL_SCHEMA}.workspaces workspace
       WHERE workspace.namespace=$1 AND workspace.id=$4 AND workspace.tenant_id=$3
         AND workspace.lifecycle='active'
-      ON CONFLICT(namespace,id) DO UPDATE SET preferred_worker_id=COALESCE(${SQL_SCHEMA}.sessions.preferred_worker_id,excluded.preferred_worker_id)
+      ON CONFLICT(namespace,id) DO UPDATE SET workspace_id=${SQL_SCHEMA}.sessions.workspace_id
       WHERE ${SQL_SCHEMA}.sessions.tenant_id=excluded.tenant_id
-    `, [this.namespace, input.sessionId, input.tenantId, input.workspaceId, input.preferredWorkerId ?? null])
+        AND ${SQL_SCHEMA}.sessions.workspace_id=excluded.workspace_id
+    `, [this.namespace, input.sessionId, input.tenantId, input.workspaceId])
     if (result.rowCount !== 1) throw Object.assign(new Error('Workspace is unavailable for Session registration'), { code: 'ENOENT' })
   }
 
@@ -407,48 +402,40 @@ export class ControlStore {
     await this.pool.query(`UPDATE ${SQL_SCHEMA}.workers SET draining=$3,heartbeat_at=now() WHERE namespace=$1 AND id=$2`, [this.namespace, workerId, draining])
   }
 
-  async routeWorker(userId: string): Promise<WorkerRecord | undefined> {
-    const client = await this.pool.connect()
-    try {
-      await client.query('BEGIN')
-      const user = await client.query<{ preferred_worker_id: string | null }>(`
-        SELECT preferred_worker_id FROM ${SQL_SCHEMA}.users WHERE namespace=$1 AND id=$2 FOR UPDATE
-      `, [this.namespace, userId])
-      const preferredWorkerId = user.rows[0]?.preferred_worker_id
-      if (user.rows[0] === undefined) { await client.query('COMMIT'); return undefined }
-      if (preferredWorkerId !== null) {
-        const preferred = await client.query<WorkerRow>(`
-          SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
-          WHERE namespace=$1 AND id=$2 AND NOT draining
-            AND heartbeat_at>now()-interval '15 seconds'
-        `, [this.namespace, preferredWorkerId])
-        const existing = preferred.rows[0]
-        if (existing !== undefined) {
-          await client.query('COMMIT')
-          return worker(existing)
-        }
-      }
-      // First placement changes durable affinity. Serialize only this cold path
-      // so a burst of registrations cannot all observe the same least-loaded
-      // Worker before any of their assignments commit. Established users never
-      // take this global placement lock.
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
-        `${this.namespace}:worker-placement`,
-      ])
-      const selected = await client.query<WorkerRow>(`
-        SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
-        WHERE namespace=$1 AND NOT draining AND heartbeat_at>now()-interval '15 seconds'
-        ORDER BY (SELECT count(*) FROM ${SQL_SCHEMA}.users assigned
-            WHERE assigned.namespace=${SQL_SCHEMA}.workers.namespace AND assigned.preferred_worker_id=${SQL_SCHEMA}.workers.id),
-          active_runs::float/maximum_runs,
-          id
-        LIMIT 1
-      `, [this.namespace])
-      const row = selected.rows[0]
-      if (row !== undefined) await client.query(`UPDATE ${SQL_SCHEMA}.users SET preferred_worker_id=$3 WHERE namespace=$1 AND id=$2`, [this.namespace, userId, row.id])
-      await client.query('COMMIT')
-      return row === undefined ? undefined : worker(row)
-    } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error } finally { client.release() }
+  /** Select a healthy Worker for a stateless Host RPC. This creates no durable placement. */
+  async selectWorker(): Promise<WorkerRecord | undefined> {
+    const result = await this.pool.query<WorkerRow>(`
+      SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
+      WHERE namespace=$1 AND NOT draining AND heartbeat_at>now()-interval '15 seconds'
+      ORDER BY active_runs::float/maximum_runs, id
+      LIMIT 1
+    `, [this.namespace])
+    const row = result.rows[0]
+    return row === undefined ? undefined : worker(row)
+  }
+
+  async listHealthyWorkers(): Promise<WorkerRecord[]> {
+    const result = await this.pool.query<WorkerRow>(`
+      SELECT id,base_url,maximum_runs,active_runs FROM ${SQL_SCHEMA}.workers
+      WHERE namespace=$1 AND NOT draining AND heartbeat_at>now()-interval '15 seconds'
+      ORDER BY id
+    `, [this.namespace])
+    return result.rows.map(worker)
+  }
+
+  /** Resolve only the current RunAttempt owner; this is transient execution ownership, not affinity. */
+  async activeRunWorker(tenantId: string, sessionId: string): Promise<WorkerRecord | undefined> {
+    const result = await this.pool.query<WorkerRow>(`
+      SELECT worker.id,worker.base_url,worker.maximum_runs,worker.active_runs
+      FROM ${SQL_SCHEMA}.runs run JOIN ${SQL_SCHEMA}.workers worker
+        ON worker.namespace=run.namespace AND worker.id=run.worker_id
+      WHERE run.namespace=$1 AND run.tenant_id=$2 AND run.session_id=$3
+        AND run.status IN ('claimed','dispatching','dispatched','running','cancel_requested')
+        AND NOT worker.draining AND worker.heartbeat_at>now()-interval '15 seconds'
+      ORDER BY run.created_at DESC LIMIT 1
+    `, [this.namespace, tenantId, sessionId])
+    const row = result.rows[0]
+    return row === undefined ? undefined : worker(row)
   }
 
   async enqueueRun(input: { tenantId: string; sessionId: string; clientRpcId: string; idempotencyKey: string; request: unknown }): Promise<EnqueuedRun> {
@@ -485,14 +472,12 @@ export class ControlStore {
       const result = await client.query<RunRow>(`
         SELECT run.id,run.tenant_id,run.session_id,run.workspace_id,run.status,run.request_json
         FROM ${SQL_SCHEMA}.runs run
-        JOIN ${SQL_SCHEMA}.sessions session ON session.namespace=run.namespace AND session.id=run.session_id
         JOIN ${SQL_SCHEMA}.tenants tenant ON tenant.namespace=run.namespace AND tenant.id=run.tenant_id
         WHERE run.namespace=$1 AND run.status='queued' AND run.available_at<=now()
-          AND (session.preferred_worker_id IS NULL OR session.preferred_worker_id=$2 OR NOT EXISTS (
-            SELECT 1 FROM ${SQL_SCHEMA}.workers preferred
-            WHERE preferred.namespace=run.namespace AND preferred.id=session.preferred_worker_id
-              AND NOT preferred.draining AND preferred.heartbeat_at>now()-interval '15 seconds'
-          ))
+          AND EXISTS (
+            SELECT 1 FROM dsh_cloud.sessions persisted
+            WHERE persisted.namespace=run.namespace AND persisted.id=run.session_id
+          )
           AND (SELECT count(*) FROM ${SQL_SCHEMA}.runs tenant_active
             WHERE tenant_active.namespace=run.namespace AND tenant_active.tenant_id=run.tenant_id
               AND tenant_active.status IN ('claimed','dispatching','dispatched','running','cancel_requested')) < tenant.maximum_concurrent_runs
@@ -506,16 +491,12 @@ export class ControlStore {
             WHERE earlier.namespace=run.namespace AND earlier.session_id=run.session_id AND earlier.status='queued'
               AND (earlier.created_at,earlier.id)<(run.created_at,run.id)
           )
-        ORDER BY CASE WHEN session.preferred_worker_id=$2 THEN 0 ELSE 1 END,
-                 tenant.last_scheduled_at ASC, run.created_at ASC, run.id ASC
+        ORDER BY tenant.last_scheduled_at ASC, run.created_at ASC, run.id ASC
         FOR UPDATE OF run SKIP LOCKED LIMIT 1
-      `, [this.namespace, workerId])
+      `, [this.namespace])
       const row = result.rows[0]
       if (row === undefined) { await client.query('COMMIT'); return { kind: 'idle' } }
       await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`${this.namespace}:${row.workspace_id}`])
-      const session = await client.query<{ preferred_worker_id: string | null }>(`SELECT preferred_worker_id FROM ${SQL_SCHEMA}.sessions WHERE namespace=$1 AND id=$2 FOR UPDATE`, [this.namespace, row.session_id])
-      const sessionRow = session.rows[0]
-      if (sessionRow === undefined) throw new Error('run session disappeared')
       const workspace = await client.query<{ next_fence: string }>(`
         SELECT next_fence::text FROM ${SQL_SCHEMA}.workspaces
         WHERE namespace=$1 AND id=$2 AND tenant_id=$3 FOR UPDATE
@@ -525,7 +506,6 @@ export class ControlStore {
       const writerFence = Number(workspaceRow.next_fence) + 1
       const attemptId = randomUUID()
       await client.query(`UPDATE ${SQL_SCHEMA}.workspaces SET next_fence=$3 WHERE namespace=$1 AND id=$2`, [this.namespace, row.workspace_id, writerFence])
-      await client.query(`UPDATE ${SQL_SCHEMA}.sessions SET preferred_worker_id=$3 WHERE namespace=$1 AND id=$2`, [this.namespace, row.session_id, workerId])
       await client.query(`UPDATE ${SQL_SCHEMA}.workers SET active_runs=active_runs+1 WHERE namespace=$1 AND id=$2`, [this.namespace, workerId])
       await client.query(`UPDATE ${SQL_SCHEMA}.tenants SET last_scheduled_at=now() WHERE namespace=$1 AND id=$2`, [this.namespace, row.tenant_id])
       await client.query(`UPDATE ${SQL_SCHEMA}.runs SET status='claimed',worker_id=$3,current_attempt_id=$4,writer_fence=$5,updated_at=now() WHERE namespace=$1 AND id=$2`, [this.namespace, row.id, workerId, attemptId, writerFence])
