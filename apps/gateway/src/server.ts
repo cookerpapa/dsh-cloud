@@ -11,7 +11,7 @@ const MAX_BODY_BYTES = 160 * 1024 * 1024
 const AUTH_COOKIE = 'dsh_cloud_session'
 const CLOUD_WORKSPACE_ROOT = '/workspaces'
 const WELCOME_PREFERENCE_KEY = 'ui-onboarding.welcomeNoticeVersion'
-const SESSION_METHODS = new Set(['session.history','session.models','session.selectModel','session.rename','session.attachment','session.updateQueue','session.cancel','session.prompt','session.fork'])
+const SESSION_METHODS = new Set(['session.history','session.models','session.selectModel','session.rename','session.attachment','session.updateQueue','session.cancel','session.prompt','session.fork','agentPreset.select'])
 const READ_ONLY_HOST_METHODS = new Set([
   'host.describe',
   'skill.list',
@@ -31,6 +31,7 @@ interface GatewayOptions {
   publicOrigin?: string
   secureCookies: boolean
   eventProjectionTimeoutMs?: number
+  allowedAgentPresets?: readonly string[]
   toolBroker?: { url: string; token: string }
 }
 
@@ -94,11 +95,15 @@ export class CloudGateway {
   private readonly server: Server
   private readonly sockets = new WebSocketServer({ noServer: true })
   private readonly eventHub: WorkerEventHub
+  private readonly allowedAgentPresets: ReadonlySet<string>
   private projectionClient: PoolClient | undefined
   private readonly projectionWaiters = new Map<string, Set<() => void>>()
 
   constructor(private readonly options: GatewayOptions) {
     if(options.eventProjectionTimeoutMs!==undefined&&(!Number.isSafeInteger(options.eventProjectionTimeoutMs)||options.eventProjectionTimeoutMs<1_000||options.eventProjectionTimeoutMs>300_000))throw new TypeError('eventProjectionTimeoutMs is invalid')
+    const configuredPresets=options.allowedAgentPresets??['standard','code']
+    if(configuredPresets.some(id=>!/^[a-z0-9][a-z0-9-]*$/.test(id)))throw new TypeError('allowed Agent preset id is invalid')
+    this.allowedAgentPresets=new Set(['standard',...configuredPresets])
     this.store=new ControlStore(options.pool,options.namespace)
     this.eventHub=new WorkerEventHub(this.store,(sessionId,seq,watermarks)=>this.waitDurable(sessionId,seq,watermarks))
     this.server=createServer((request,response)=>void this.handle(request,response).catch(error=>this.fail(response,error)))
@@ -189,12 +194,16 @@ export class CloudGateway {
     if(envelope.method==='host.listDirectory'||envelope.method==='host.createDirectory'){this.cloudDirectory(response,envelope);return}
     const sid=sessionId(envelope)
     if(SESSION_METHODS.has(envelope.method)&&(sid===undefined||!await this.store.ownsSession(principal.tenantId,sid))){rpcError(response,envelope,'session-not-found','Session was not found');return}
+    if(envelope.method==='agentPreset.select'){
+      const agentPreset=envelope.payload['agentPreset']
+      if(typeof agentPreset!=='string'||!this.allowedAgentPresets.has(agentPreset)){rpcError(response,envelope,'agent-preset-not-found','Agent preset is not enabled for this cloud deployment');return}
+    }
     if(envelope.method==='session.prompt'){
       const enqueued=await this.store.enqueueRun({tenantId:principal.tenantId,sessionId:sid!,clientRpcId:envelope.rpcId,idempotencyKey:String(request.headers['idempotency-key']??envelope.rpcId),request:envelope})
       rpc(response,envelope,{accepted:true,runId:enqueued.runId});return
     }
     if(envelope.method==='session.cancel'){await this.store.requestSessionCancellation(principal.tenantId,sid!);rpc(response,envelope,{accepted:true});return}
-    if(envelope.method==='session.rename'||envelope.method==='session.selectModel')await this.store.issueSessionCommand(principal.tenantId,sid!,envelope.rpcId)
+    if(envelope.method==='session.rename'||envelope.method==='session.selectModel'||envelope.method==='agentPreset.select')await this.store.issueSessionCommand(principal.tenantId,sid!,envelope.rpcId)
     if(envelope.method==='session.updateQueue')await this.store.issueSessionCommand(principal.tenantId,sid!,envelope.rpcId,true)
     const worker=sid===undefined
       ?await this.store.selectWorker()
@@ -202,6 +211,8 @@ export class CloudGateway {
     if(worker===undefined){rpcError(response,envelope,'internal','No healthy DSH Worker is available',503);return}
     if(envelope.method==='settings.describe'||envelope.method==='settings.mutate'){await this.cloudSettings(response,principal,worker,envelope,request);return}
     if(envelope.method==='session.create'){
+      const agentPreset=envelope.payload['agentPreset']
+      if(agentPreset!==undefined&&(typeof agentPreset!=='string'||!this.allowedAgentPresets.has(agentPreset))){rpcError(response,envelope,'agent-preset-not-found','Agent preset is not enabled for this cloud deployment');return}
       const requested=typeof envelope.payload['workspaceId']==='string'&&await this.store.workspaceOwned(principal.tenantId,envelope.payload['workspaceId'])?envelope.payload['workspaceId']:undefined
       const workspaceId=requested??(await this.store.ensureDefaultWorkspace(principal.tenantId)).id
       const allocated=typeof envelope.payload['sessionId']==='string'?envelope.payload['sessionId']:randomUUID()
@@ -228,9 +239,28 @@ export class CloudGateway {
       const upstream=await this.fetchWorker(worker,path,request,body)
       await copyResponse(upstream,response,value=>{const answer=okValue(value);if(answer!==undefined&&Array.isArray(answer['items']))answer['items']=(answer['items'] as Array<Record<string,unknown>>).filter(item=>typeof item['sessionId']==='string'&&allowed.has(item['sessionId']));return value});return
     }
+    if(envelope.method==='agentPreset.select'){
+      await copyResponse(await this.fetchWorker(worker,path,request,body),response)
+      return
+    }
     if(SESSION_METHODS.has(envelope.method)){
       await copyResponse(await this.fetchWorker(worker,path,request,body),response)
       return
+    }
+    if(envelope.method==='agentPreset.list'){
+      const upstream=await this.fetchWorker(worker,path,request,body)
+      await copyResponse(upstream,response,value=>{
+        const answer=okValue(value)
+        if(answer===undefined||!Array.isArray(answer['presets']))return value
+        answer['presets']=(answer['presets'] as Array<Record<string,unknown>>).filter(preset=>preset['trust']==='system'&&typeof preset['id']==='string'&&this.allowedAgentPresets.has(preset['id']))
+        answer['authorable']=false
+        answer['hasDocument']=false
+        return value
+      });return
+    }
+    if(envelope.method==='agentPreset.read'){
+      const agentPreset=envelope.payload['agentPreset']
+      if(typeof agentPreset!=='string'||!this.allowedAgentPresets.has(agentPreset)){rpcError(response,envelope,'agent-preset-not-found','Agent preset is not enabled for this cloud deployment');return}
     }
     if(!READ_ONLY_HOST_METHODS.has(envelope.method)){
       const code=envelope.method.startsWith('settings.')?'settings-not-exposed':envelope.method.startsWith('credentials.')?'credential-rejected':'bad-request'

@@ -21,6 +21,7 @@ The runnable cloud slice provides:
 - a PostgreSQL transactional Run queue with idempotent admission, per-Workspace serialization, fair claims, leases, fencing, cancellation, and crash reconciliation;
 - a horizontally scalable pool of short-lived DSH Agent runs; `LISTEN/NOTIFY` is only a latency hint and polling preserves correctness;
 - bounded process-local Agent residency: after an ordinary user Turn is durably flushed, DSH's public `AgentHandle` is disposed and the next Run resumes through shared SessionPersistence;
+- deployment-approved per-Session Harness profiles, with the chosen DSH Agent preset preserved across Worker handoff;
 - a shared Gateway event outlet that aggregates every healthy Worker's native downlink, so browser delivery and future Runs do not depend on user/Session placement;
 - projection watermarks that prevent live Session events from reaching a browser before Kafka and Valkey acknowledge them;
 - one stable Cube Volume per tenant Workspace, reattached to replacement KVMs.
@@ -139,6 +140,7 @@ Important lifecycle values are deliberately shared across components:
 | `DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS` | 24 h | Retention of the rebuildable Valkey live projection; settled history remains in PostgreSQL Turn segments. |
 | `DSH_CLOUD_KAFKA_EVENT_RETENTION_MS` | 30 d | Maximum recovery horizon for an unfinished Turn; it must exceed the Valkey replay window. Configure existing external topics to the same value. |
 | `DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS` | 90 s | Gateway visibility deadline; permits one bounded Kafka retry before failing closed. |
+| `DSH_CLOUD_AGENT_PRESETS` | `standard,code` | Trusted Agent presets selectable for a blank Session; every Worker image must ship the same compositions. |
 
 Workers heartbeat every five seconds. The default 20-second Run lease therefore
 tolerates transient database delays while still fencing an abandoned Attempt

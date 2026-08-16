@@ -16,6 +16,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
   const pool=new Pool({connectionString,max:10})
   let fake:Server,fakeSockets:WebSocketServer,fakeB:Server,fakeSocketsB:WebSocketServer,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
   const workerOrigins=new Map<string,string|undefined>()
+  const workerRequests=new Map<string,{method:string;payload:Record<string,unknown>}>()
 
   beforeAll(async()=>{
     fake=createServer(async(request,response)=>{
@@ -23,8 +24,17 @@ enabled('multi-tenant Cloud Gateway',()=>{
       if(request.url==='/v1/workspaces/destroy'&&request.method==='POST'){response.writeHead(200,{'content-type':'application/json'});response.end('{"deleted":true}');return}
       const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));const envelope=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {rpcId:string;method:string;payload:Record<string,unknown>}
       workerOrigins.set(envelope.rpcId,request.headers.origin)
+      workerRequests.set(envelope.rpcId,{method:envelope.method,payload:envelope.payload})
       let value:unknown={}
       if(envelope.method==='session.create')value={sessionId:envelope.payload['sessionId']}
+      if(envelope.method==='agentPreset.list')value={presets:[
+        {id:'standard',trust:'system',isDefault:true},
+        {id:'code',trust:'system',isDefault:false},
+        {id:'minimal',trust:'system',isDefault:false},
+        {id:'cordis',trust:'system',isDefault:false},
+        {id:'local-user-preset',trust:'user',isDefault:false},
+      ],authorable:true,hasDocument:true}
+      if(envelope.method==='agentPreset.select')value={agentPreset:envelope.payload['agentPreset']}
       if(envelope.method==='session.list')value={items:[{sessionId:ownedSession},{sessionId:'foreign-session'}]}
       if(envelope.method==='session.history')value={events:[],hasMore:false}
       if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[{ns:'ui-onboarding',schema:{},value:{},applies:'live',secrets:[],revision:0}]}
@@ -68,6 +78,25 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const listed=await fetch(`${baseUrl}/api/session.list`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.list',payload:{}})})
     const list=await listed.json() as {result:{value:{items:Array<{sessionId:string}>}}}
     expect(list.result.value.items.map(item=>item.sessionId)).toEqual([ownedSession])
+  })
+
+  test('offers only cloud-safe Harness profiles and pins one to a blank owned Session',async()=>{
+    const listedEnvelope={type:'client-request',rpcId:randomUUID(),method:'agentPreset.list',payload:{}}
+    const listed=await fetch(`${baseUrl}/api/agentPreset.list`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(listedEnvelope)})
+    expect(await listed.json()).toMatchObject({result:{ok:true,value:{presets:[
+      {id:'standard',trust:'system',isDefault:true},
+      {id:'code',trust:'system',isDefault:false},
+    ],authorable:false,hasDocument:false}}})
+
+    const rpcId=randomUUID()
+    const selectedEnvelope={type:'client-request',rpcId,method:'agentPreset.select',payload:{sessionId:ownedSession,agentPreset:'code'}}
+    const selected=await fetch(`${baseUrl}/api/agentPreset.select`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(selectedEnvelope)})
+    expect(await selected.json()).toMatchObject({result:{ok:true,value:{agentPreset:'code'}}})
+    expect(workerRequests.get(rpcId)).toEqual({method:'agentPreset.select',payload:{sessionId:ownedSession,agentPreset:'code'}})
+
+    const rejectedEnvelope={type:'client-request',rpcId:randomUUID(),method:'agentPreset.select',payload:{sessionId:ownedSession,agentPreset:'cordis'}}
+    const rejected=await fetch(`${baseUrl}/api/agentPreset.select`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(rejectedEnvelope)})
+    expect(await rejected.json()).toMatchObject({result:{ok:false,error:{code:'agent-preset-not-found'}}})
   })
 
   test('terminates browser Origin trust at the Gateway before invoking a Worker',async()=>{

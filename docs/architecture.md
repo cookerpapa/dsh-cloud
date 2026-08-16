@@ -60,6 +60,29 @@ under DSH's own continuation manager. The next user Run may land on any Worker
 and resumes from the shared native Session log. This bounds Worker memory and
 prevents an old Worker from later reusing a stale in-memory context.
 
+## Per-Session Harness profiles
+
+DSH already models a specialized Harness as an Agent preset: one trusted
+Cordis composition supplies the prompt, tools, compaction and delegation
+surface for every Session that joins it. DSH Cloud keeps `standard` as the
+genesis/default profile and exposes only deployment-approved presets when a
+new Session is blank. The selected preset is recorded in the native Session
+header/event log, so an arbitrary Worker cold-resumes the same composition
+without durable Worker affinity.
+
+Cloud profile selection is deliberately not arbitrary plugin upload. A preset
+executes inside the trusted Worker; the upstream `minimal` preset installs a
+host-local filesystem, while `cordis` can edit the live Harness. Exposing
+either would bypass the Cube boundary. Worker-local authoring would also make
+the same Session resolve differently across replicas. Gateway therefore
+exposes neither preset authoring nor default mutation, defaults its selection
+allowlist to `standard,code`, filters out user-trust rows, and requires
+specialized profiles to be reviewed and shipped identically in the immutable
+Worker image. A future self-evolution
+workflow should produce a candidate composition, validate it in an isolated
+build, and promote a signed image/profile version; it must not load
+model-written code directly into a multi-tenant trusted Worker.
+
 A newly created control-plane Session is not claimable until its DSH-native
 Session row has materialized. This closes the race in which `session.create`
 returns before the asynchronous persistence batch becomes visible to a

@@ -17,6 +17,7 @@ run:
 gateway:
   replicas: 2
   dbPool: 20
+  agentPresets: "standard,code"
   secureCookies: true
   eventProjectionTimeoutMs: 90000
   service:

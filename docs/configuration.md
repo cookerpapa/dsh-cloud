@@ -39,6 +39,7 @@ rebuildable projection.
 | --- | --- |
 | `DSH_CLOUD_GATEWAY_HOST` / `DSH_CLOUD_GATEWAY_PORT` | Public authenticated Gateway bind. |
 | `DSH_CLOUD_GATEWAY_DB_POOL` | Gateway PostgreSQL pool size; default `20`. |
+| `DSH_CLOUD_AGENT_PRESETS` | Comma-separated, deployment-approved per-Session Harness profiles exposed by Gateway; `standard` is always retained as the genesis/default profile. |
 | `DSH_CLOUD_PUBLIC_ORIGIN` | Optional canonical browser origin. |
 | `DSH_CLOUD_SECURE_COOKIES` | Set to `1` behind HTTPS. |
 | `DSH_CLOUD_WORKER_ID` | Unique current Worker identity, not durable Session placement. |
@@ -51,6 +52,13 @@ rebuildable projection.
 `DSH_CLOUD_WORKER_ENABLED=0` is an internal profile switch used when launching
 the upstream Host without a queue consumer. It is not a second deployment
 mode and creates no local execution fallback.
+
+Agent presets are executable Cordis compositions, not untrusted preference
+documents. Cloud Gateway exposes no preset copy, remove, write or default
+mutation operation. Add a specialized profile by reviewing it, shipping it
+identically in the immutable Worker image, and then adding its id to
+`DSH_CLOUD_AGENT_PRESETS`. The default profile is available to every new
+Session; a selected profile is fixed after the first Turn.
 
 ## Cube execution plane
 

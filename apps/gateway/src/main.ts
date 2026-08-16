@@ -11,6 +11,8 @@ if (brokerUrl === undefined || brokerToken === undefined) {
   throw new Error('DSH_CLOUD_TOOL_BROKER_URL and DSH_CLOUD_TOOL_BROKER_TOKEN are required')
 }
 const configuredOrigin = process.env['DSH_CLOUD_PUBLIC_ORIGIN']?.trim()
+const allowedAgentPresets = (process.env['DSH_CLOUD_AGENT_PRESETS'] ?? 'standard,code')
+  .split(',').map(value => value.trim()).filter(value => value !== '')
 const pool = new Pool({
   connectionString,
   max: Number(process.env['DSH_CLOUD_GATEWAY_DB_POOL'] ?? '20'),
@@ -22,6 +24,7 @@ const gateway = new CloudGateway({
   ...(configuredOrigin === undefined || configuredOrigin === '' ? {} : { publicOrigin: configuredOrigin }),
   secureCookies: process.env['DSH_CLOUD_SECURE_COOKIES'] === '1',
   eventProjectionTimeoutMs: Number(process.env['DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS'] ?? 90_000),
+  allowedAgentPresets,
   toolBroker: { url: brokerUrl, token: brokerToken },
 })
 await gateway.initialize()

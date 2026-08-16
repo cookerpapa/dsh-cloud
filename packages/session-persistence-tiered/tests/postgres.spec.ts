@@ -181,7 +181,7 @@ integration('TieredSessionPersistence', () => {
   it('round-trips native DSH events through the official persistence contract', async () => {
     const namespace = `test-${randomUUID()}`
     const { ctx } = await backend(namespace)
-    const meta = header('round-trip')
+    const meta = { ...header('round-trip'), agentPreset: 'code' }
     const log = completedTurn()
     await ctx.sessionPersistence.create(meta)
     await ctx.cloudRunContext.run(authority(meta.id, 1), () =>

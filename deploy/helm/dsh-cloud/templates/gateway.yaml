@@ -25,6 +25,7 @@ spec:
             - { name: DSH_CLOUD_NAMESPACE, value: {{ include "dsh-cloud.namespace" . | quote }} }
             - { name: DSH_CLOUD_GATEWAY_PORT, value: "8080" }
             - { name: DSH_CLOUD_GATEWAY_DB_POOL, value: {{ .Values.gateway.dbPool | quote }} }
+            - { name: DSH_CLOUD_AGENT_PRESETS, value: {{ .Values.gateway.agentPresets | quote }} }
             - { name: DSH_CLOUD_SECURE_COOKIES, value: {{ ternary "1" "0" .Values.gateway.secureCookies | quote }} }
             - { name: DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS, value: {{ .Values.gateway.eventProjectionTimeoutMs | quote }} }
             - { name: DSH_CLOUD_TOOL_BROKER_URL, value: http://{{ .Release.Name }}-tool-broker:3090 }
