@@ -70,7 +70,9 @@ await exposeCloudPlugin('@dsh-cloud/execution-client')
 await exposeCloudPlugin('@dsh-cloud/subprocess-remote')
 await exposeCloudPlugin('@dsh-cloud/fs-remote')
 await exposeCloudPlugin('@dsh-cloud/sandbox-remote')
-await exposeCloudPlugin('@dsh-cloud/session-persistence-postgres')
+await exposeCloudPlugin('@dsh-cloud/session-live-kafka')
+await exposeCloudPlugin('@dsh-cloud/session-live-valkey')
+await exposeCloudPlugin('@dsh-cloud/session-persistence-tiered')
 
 const host = process.env['DSH_CLOUD_HOST'] ?? '127.0.0.1'
 const port = process.env['DSH_CLOUD_PORT'] ?? '3080'

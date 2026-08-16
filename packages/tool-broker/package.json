@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-cloud/sandbox-manager",
+  "name": "@dsh-cloud/tool-broker",
   "version": "0.1.0",
   "private": true,
   "type": "module",

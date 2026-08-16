@@ -15,10 +15,16 @@ import CloudRunContext, {
   writerFence,
   type RunAuthority,
 } from '@dsh-cloud/run-context'
-import PostgresSessionPersistence, { StaleSessionWriterError } from '../src/index.ts'
+import KafkaSessionLiveLog from '@dsh-cloud/session-live-kafka'
+import ValkeySessionLiveProjection from '@dsh-cloud/session-live-valkey'
+import TieredSessionPersistence, { StaleSessionWriterError } from '../src/index.ts'
 
 const databaseUrl = process.env['DSH_CLOUD_TEST_DATABASE_URL']
-const integration = databaseUrl === undefined ? describe.skip : describe
+const kafkaBrokers = process.env['DSH_CLOUD_TEST_KAFKA_BROKERS']
+const valkeyUrl = process.env['DSH_CLOUD_TEST_VALKEY_URL']
+const integration = databaseUrl === undefined || kafkaBrokers === undefined || valkeyUrl === undefined
+  ? describe.skip
+  : describe
 const disposers: Array<() => Promise<void>> = []
 
 afterEach(async () => {
@@ -89,14 +95,27 @@ async function backend(namespace: string): Promise<{
   const ctx = new Context()
   const sessionFiber = await ctx.plugin(SessionStore)
   const runFiber = await ctx.plugin(CloudRunContext)
-  const persistenceFiber = await ctx.plugin(PostgresSessionPersistence, {
+  const liveLogFiber = await ctx.plugin(KafkaSessionLiveLog, {
+    brokers: kafkaBrokers as string,
+    topic: `dsh-cloud-session-test-${namespace}`,
+    clientId: 'dsh-cloud-session-test',
+  })
+  const projectionFiber = await ctx.plugin(ValkeySessionLiveProjection, {
+    url: valkeyUrl as string,
+    retentionSeconds: 3600,
+  })
+  const persistenceFiber = await ctx.plugin(TieredSessionPersistence, {
     connectionString: databaseUrl as string,
     namespace,
     requireWriterAuthority: true,
     writeBatchMaxDelayMs: 1,
+    liveLogPartitions: 3,
+    liveLogReplicationFactor: 1,
   })
   const dispose = async (): Promise<void> => {
     await persistenceFiber.dispose()
+    await projectionFiber.dispose()
+    await liveLogFiber.dispose()
     await runFiber.dispose()
     await sessionFiber.dispose()
   }
@@ -104,7 +123,7 @@ async function backend(namespace: string): Promise<{
   return { ctx, dispose }
 }
 
-integration('PostgresSessionPersistence', () => {
+integration('TieredSessionPersistence', () => {
   it('round-trips native DSH events through the official persistence contract', async () => {
     const namespace = `test-${randomUUID()}`
     const { ctx } = await backend(namespace)
@@ -128,7 +147,7 @@ integration('PostgresSessionPersistence', () => {
     const log = completedTurn()
     await ctx.sessionPersistence.create(meta)
     const runAuthority = authority(meta.id, 2)
-    ;(ctx.sessionPersistence as PostgresSessionPersistence).bindRunAuthority(runAuthority)
+    ;(ctx.sessionPersistence as TieredSessionPersistence).bindRunAuthority(runAuthority)
     expect(ctx.cloudRunContext.current()).toBeUndefined()
 
     await ctx.sessionPersistence.append(meta.id, log)
@@ -186,6 +205,41 @@ integration('PostgresSessionPersistence', () => {
         { type: 'step/start', seq: 7, time: 8, data: { turn: 2, step: 1 } },
       ])
     })
+
+    const pool = new Pool({ connectionString: databaseUrl as string })
+    try {
+      const shape = await pool.query<{
+        activeBatches: string
+        segments: string
+        legacyEvents: string | null
+        legacyOutbox: string | null
+        payloadColumns: string
+      }>(`
+        SELECT
+          (SELECT count(*) FROM dsh_cloud.session_event_batches
+            WHERE namespace=$1 AND session_id=$2)::text AS "activeBatches",
+          (SELECT count(*) FROM dsh_cloud.session_segments
+            WHERE namespace=$1 AND session_id=$2)::text AS segments,
+          to_regclass('dsh_cloud.session_events')::text AS "legacyEvents",
+          to_regclass('dsh_cloud.session_event_outbox')::text AS "legacyOutbox",
+          (SELECT count(*) FROM information_schema.columns
+            WHERE table_schema='dsh_cloud' AND table_name='session_event_batches'
+              AND column_name IN ('payload','event','records'))::text AS "payloadColumns"
+      `, [namespace, meta.id])
+      expect(shape.rows[0]).toEqual({
+        activeBatches: '1',
+        segments: '1',
+        legacyEvents: null,
+        legacyOutbox: null,
+        payloadColumns: '0',
+      })
+    } finally {
+      await pool.end()
+    }
+
+    // Valkey is a projection, not authority. Simulate total projection loss;
+    // the next Worker must rebuild it from PostgreSQL locators + Kafka bytes.
+    await first.ctx.sessionLiveProjection.reset(namespace, String(meta.id), -1)
     await first.dispose()
     disposers.splice(disposers.indexOf(first.dispose), 1)
 
@@ -198,7 +252,7 @@ integration('PostgresSessionPersistence', () => {
       .toEqual({ kind: 'interrupted' })
   })
 
-  it('packs token-sized assistant deltas without changing the native DSH log', async () => {
+  it('keeps token-sized deltas out of PostgreSQL rows after sealing the native DSH Turn', async () => {
     const namespace = `test-${randomUUID()}`
     const { ctx } = await backend(namespace)
     const meta = header('packed-chunks')
@@ -261,14 +315,14 @@ integration('PostgresSessionPersistence', () => {
 
     const pool = new Pool({ connectionString: databaseUrl as string })
     try {
-      const rows = await pool.query<{ hot: string; segments: string }>(`
+      const rows = await pool.query<{ activeBatches: string; segments: string }>(`
         SELECT
-          (SELECT count(*) FROM dsh_cloud.session_events
-            WHERE namespace=$1 AND session_id=$2)::text AS hot,
+          (SELECT count(*) FROM dsh_cloud.session_event_batches
+            WHERE namespace=$1 AND session_id=$2)::text AS "activeBatches",
           (SELECT count(*) FROM dsh_cloud.session_segments
             WHERE namespace=$1 AND session_id=$2)::text AS segments
       `, [namespace, meta.id])
-      expect(rows.rows[0]).toEqual({ hot: '0', segments: '1' })
+      expect(rows.rows[0]).toEqual({ activeBatches: '0', segments: '1' })
     } finally {
       await pool.end()
     }

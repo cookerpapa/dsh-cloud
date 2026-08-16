@@ -19,7 +19,7 @@ if [[ ! -f "${environment_file}" ]]; then
   chmod 0600 "${environment_file}"
   sed -i \
     -e "s|^POSTGRES_PASSWORD=$|POSTGRES_PASSWORD=$(openssl rand -hex 24)|" \
-    -e "s|^DSH_CLOUD_SANDBOX_MANAGER_TOKEN=$|DSH_CLOUD_SANDBOX_MANAGER_TOKEN=$(openssl rand -hex 32)|" \
+    -e "s|^DSH_CLOUD_TOOL_BROKER_TOKEN=$|DSH_CLOUD_TOOL_BROKER_TOKEN=$(openssl rand -hex 32)|" \
     -e "s|^DSH_CLOUD_SANDBOX_ENCRYPTION_KEY=$|DSH_CLOUD_SANDBOX_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr -d '\n')|" \
     "${environment_file}"
   log "created ${environment_file}; add the DeepSeek and Cube values, then rerun"
@@ -27,7 +27,7 @@ if [[ ! -f "${environment_file}" ]]; then
 fi
 
 required=(
-  POSTGRES_PASSWORD DSH_CLOUD_SANDBOX_MANAGER_TOKEN DSH_CLOUD_SANDBOX_ENCRYPTION_KEY
+  POSTGRES_PASSWORD DSH_CLOUD_TOOL_BROKER_TOKEN DSH_CLOUD_SANDBOX_ENCRYPTION_KEY
   DEEPSEEK_API_KEY DSH_CLOUD_CUBE_API_URL DSH_CLOUD_CUBE_API_KEY
   DSH_CLOUD_CUBE_CONTROL_NETWORK DSH_CLOUD_CUBE_TEMPLATE_ID
   DSH_CLOUD_CUBE_PROXY_NODE_IP DSH_CLOUD_CUBE_EGRESS_PROXY_IP

@@ -100,7 +100,7 @@ function signalName(signal: NodeJS.Signals | null): NodeJS.Signals | null {
 
 /**
  * Credential-free execution engine intended to run inside one Cube microVM.
- * The trusted Sandbox Manager owns identity and fencing; this class owns only
+ * The trusted Tool Broker owns identity and fencing; this class owns only
  * filesystem containment, process trees, bounded output and cancellation.
  */
 export class ExecutionEngine {

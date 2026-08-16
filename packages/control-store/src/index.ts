@@ -331,7 +331,7 @@ export class ControlStore {
     return (await this.listWorkspaces(tenantId)).find(item => item.id === workspaceId)
   }
 
-  /** Reserve an empty Workspace for physical deletion by Sandbox Manager. */
+  /** Reserve an empty Workspace for physical deletion by the Tool Broker. */
   async beginWorkspaceDeletion(tenantId: string, workspaceId: string): Promise<boolean> {
     const result = await this.pool.query(`
       UPDATE ${SQL_SCHEMA}.workspaces workspace

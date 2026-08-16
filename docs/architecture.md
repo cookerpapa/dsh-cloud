@@ -10,13 +10,13 @@ DSH Cloud therefore depends on released DSH packages and adds a Cloud profile. U
 
 | State | Authority | Cache allowed |
 | --- | --- | --- |
-| DSH Session metadata, settled Turn segments, active hot tail | PostgreSQL SessionPersistence | yes |
-| Durable live publication | Kafka, sourced through PostgreSQL Outbox | no |
+| DSH Session metadata and settled Turn segments | PostgreSQL through the tiered SessionPersistence plugin | yes |
+| Exact unfinished native Session suffix | SessionLiveLog provider (Kafka by default) | no |
 | Run/Attempt scheduling | PostgreSQL transactional Run queue | no |
 | Workspace files | persistent Cube Volume | attached to one active Cube |
 | Live processes | one Cube activation; disposable | no durable claim |
 | Model credentials | trusted Worker credential provider | no sandbox access |
-| UI live projection | Valkey, rebuildable from Kafka/PostgreSQL | yes |
+| UI live projection | SessionLiveProjection provider (Valkey by default), rebuildable from Kafka locators | yes |
 
 DSH Session events, not browser deltas or a reconstructed `messages[]`, are the conversation authority. A Worker may resume a Session on another machine by loading those events through the official persistence seam.
 
@@ -29,7 +29,7 @@ increasing fence. `LISTEN/NOTIFY` wakes idle Workers but is never required for
 correctness; bounded polling covers lost notifications and reconnects.
 
 The same `DSH_CLOUD_RUN_LEASE_SECONDS` value controls stale-Attempt
-reconciliation in Workers and Tool admission in Sandbox Manager. A deployment
+reconciliation in Workers and Tool admission in Tool Broker. A deployment
 must not let those values diverge: an execution request is valid only while
 the Run, Attempt, fence and heartbeat are all current in PostgreSQL.
 
@@ -75,18 +75,18 @@ DSH already defines `ctx.fs` and `ctx.subprocess` as provider seams. Its E2B pro
 DSH tool consumer
   -> ctx.fs / ctx.subprocess
   -> authenticated execution-world client
-  -> Sandbox Manager
+  -> Tool Broker
   -> CubeSandbox KVM
 ```
 
 The model cannot select a sandbox id, namespace, runtime class, mount, or network policy. Those values are derived from trusted Run authority.
 
 The execution agent listens only behind Cube private ingress. Its initial bind
-is authorized by Cube's traffic token, which only Sandbox Manager holds. The
-manager then installs a random per-activation secret and monotonically
+is authorized by Cube's traffic token, which only Tool Broker holds. The
+broker then installs a random per-activation secret and monotonically
 increasing writer fence. Later calls require all three identities. The agent
 contains no model key, database URL, object-store credential, Cube API key, or
-Sandbox Manager token.
+Tool Broker token.
 
 The remote filesystem and subprocess providers share the same activation and
 `/workspace`; a file written through `ctx.fs` is immediately visible to a
@@ -108,7 +108,7 @@ process and memory state are explicitly treated as disposable.
 
 Workspace deletion is a retryable lifecycle operation. Gateway first changes
 an empty Workspace from `active` to `deleting`, making it unavailable to new
-Sessions. Sandbox Manager then retires any activation, deletes the persistent
+Sessions. Tool Broker then retires any activation, deletes the persistent
 Volume, and finally removes the PostgreSQL Workspace row. An ambiguous remote
 failure leaves the row in `deleting` for retry; it is never reactivated after
 the platform may already have deleted its bytes.
@@ -118,27 +118,34 @@ the platform may already have deleted its bytes.
 The official DSH Worker emits fine-grained Session events. Before Gateway
 forwards a `session/event` frame, it verifies that the durable live projection
 has advanced through that event sequence. The upstream persistence coordinator
-first coalesces adjacent events into a bounded batch. One PostgreSQL transaction
-appends that batch to the unfinished hot tail, records small semantic markers,
-and writes a transactional Outbox entry. The append returns only after commit,
-preserving DSH's official atomic first-write and append contract.
+first coalesces adjacent events into a bounded batch. The production
+`SessionPersistence` plugin sends the exact native batch to the injected
+`SessionLiveLog` Provider, waits for its durable acknowledgement, and applies
+the same envelope to the injected `SessionLiveProjection` Provider. The
+defaults are Kafka `acks=all` and a sequence-checked Valkey Stream.
 
-Session Event Relay replicas claim the oldest Outbox entry for each Session,
-publish it to Kafka with `acks=all` and an idempotent producer, then append it
-to a sequence-checked Valkey Stream. Only after both acknowledgements does the
-Relay advance PostgreSQL's `projected_through` watermark. Gateway waits on that
-watermark before forwarding the event, so browser visibility never gets ahead
-of the durable Kafka record and rebuildable live projection. Retries are
-identified by Session sequence and a canonical SHA-256 digest.
+Only the batch sequence range, opaque durable Provider location and canonical SHA-256
+digest enter PostgreSQL; fine token payloads do not. The same PostgreSQL
+transaction records small semantic markers and advances `projected_through`.
+Gateway waits on that watermark before forwarding the Worker frame, so browser
+visibility never gets ahead of Kafka durability and the rebuildable projection.
 
-When `turn/end` is appended, the same Session transaction compresses all events
-since the previous terminal boundary into one immutable PostgreSQL segment and
-deletes the corresponding fine-grained hot rows. The segment uses DSH's native
+When `turn/end` is appended, the same Session transaction reads the indexed
+Kafka suffix, compresses all events since the previous terminal boundary into
+one immutable PostgreSQL segment, and deletes the corresponding location rows.
+The segment uses DSH's native
 StorageRecord codec plus gzip and expands to the exact logical event sequence
 on recovery. PostgreSQL therefore keeps roughly one large row per Turn rather
-than one permanent row per token chunk; Kafka and Valkey retain only the
-bounded live-delivery horizon. There is no S3/MinIO dependency and no second
-SessionStorage authority.
+than one permanent row per token chunk. An interrupted Turn is recovered from
+the sealed PostgreSQL prefix plus exact live-log locations; Valkey can be rebuilt.
+There is no S3/MinIO dependency and no separately reconstructed `messages[]`.
+
+The live log and projection are Cordis Service Definitions. The tiered
+SessionPersistence imports neither Kafka nor Valkey clients; deployments can
+replace either Provider while retaining the official DSH storage contract.
+PostgreSQL is replaceable at the wider, upstream-defined boundary by installing
+a different `SessionPersistence` plugin in the Cordis profile.
+See [the persistence decision](decisions/tiered-session-persistence.md).
 
 ## Implemented milestones
 

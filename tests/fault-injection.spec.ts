@@ -7,12 +7,18 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { ControlStore, type ClaimedRun } from '@dsh-cloud/control-store'
 import CloudRunContext, { cloudIdentifier, writerFence } from '@dsh-cloud/run-context'
 import { PostgresRunWorker, type RunExecutionBackend } from '@dsh-cloud/run-queue'
-import PostgresSessionPersistence, { StaleSessionWriterError } from '@dsh-cloud/session-persistence-postgres'
+import TieredSessionPersistence, { StaleSessionWriterError } from '@dsh-cloud/session-persistence-tiered'
+import KafkaSessionLiveLog from '@dsh-cloud/session-live-kafka'
+import ValkeySessionLiveProjection from '@dsh-cloud/session-live-valkey'
 import { EXECUTION_PROTOCOL_VERSION, type ExecutionRequest, type ExecutionResponse } from '@dsh-cloud/execution-protocol'
-import { SandboxManager, type SandboxBinding, type SandboxHandle, type SandboxProvider } from '@dsh-cloud/sandbox-manager'
+import { ToolBroker, type SandboxBinding, type SandboxHandle, type SandboxProvider } from '@dsh-cloud/tool-broker'
 
 const connectionString = process.env['DSH_CLOUD_TEST_DATABASE_URL']
-const integration = connectionString === undefined ? describe.skip : describe
+const kafkaBrokers = process.env['DSH_CLOUD_TEST_KAFKA_BROKERS']
+const valkeyUrl = process.env['DSH_CLOUD_TEST_VALKEY_URL']
+const integration = connectionString === undefined || kafkaBrokers === undefined || valkeyUrl === undefined
+  ? describe.skip
+  : describe
 const cleanups: Array<() => Promise<void>> = []
 
 afterEach(async () => {
@@ -62,15 +68,15 @@ integration('cloud failure semantics', () => {
       async destroy(): Promise<void> {},
       async inspect(): Promise<'ready'> { return 'ready' },
     }
-    const manager = new SandboxManager({
+    const broker = new ToolBroker({
       pool,
       namespace,
-      internalToken: 'fault-test-manager-token-with-32-characters',
+      internalToken: 'fault-test-tool-broker-token-with-32-characters',
       encryptionKey: Buffer.alloc(32, 7),
       provider,
       attemptLeaseSeconds: 20,
     })
-    await manager.initialize()
+    await broker.initialize()
     cleanups.push(async () => {
       await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1', [namespace])
       await pool.query('DELETE FROM dsh_cloud_control.workers WHERE namespace=$1', [namespace])
@@ -90,12 +96,12 @@ integration('cloud failure semantics', () => {
       },
       operation: { kind: 'fs.list', path: '/workspace' },
     }
-    await expect(manager.execute(request)).resolves.toMatchObject({ ok: true })
+    await expect(broker.execute(request)).resolves.toMatchObject({ ok: true })
     await pool.query(`UPDATE dsh_cloud_control.runs SET status='cancel_requested' WHERE namespace=$1 AND id=$2`, [namespace, claimed.run.runId])
-    await expect(manager.execute({ ...request, operationId: randomUUID() })).rejects.toMatchObject({ code: 'ECANCELED' })
+    await expect(broker.execute({ ...request, operationId: randomUUID() })).rejects.toMatchObject({ code: 'ECANCELED' })
     await pool.query(`UPDATE dsh_cloud_control.runs SET status='claimed' WHERE namespace=$1 AND id=$2`, [namespace, claimed.run.runId])
     await pool.query(`UPDATE dsh_cloud_control.run_attempts SET heartbeat_at=now()-interval '1 minute' WHERE namespace=$1 AND id=$2`, [namespace, claimed.run.attemptId])
-    await expect(manager.execute({ ...request, operationId: randomUUID() })).rejects.toMatchObject({ code: 'ESTALE' })
+    await expect(broker.execute({ ...request, operationId: randomUUID() })).rejects.toMatchObject({ code: 'ESTALE' })
     expect(executions).toBe(1)
     expect((await store.runResponse(admitted.runId))?.status).toBe('claimed')
   })
@@ -115,13 +121,24 @@ integration('cloud failure semantics', () => {
     const fibers = [
       await ctx.plugin(SessionStore),
       await ctx.plugin(CloudRunContext),
-      await ctx.plugin(PostgresSessionPersistence, {
+      await ctx.plugin(KafkaSessionLiveLog, {
+        brokers: kafkaBrokers as string,
+        topic: `dsh-cloud-session-test-${namespace}`,
+        clientId: 'dsh-cloud-fault-test',
+      }),
+      await ctx.plugin(ValkeySessionLiveProjection, {
+        url: valkeyUrl as string,
+        retentionSeconds: 3600,
+      }),
+      await ctx.plugin(TieredSessionPersistence, {
         connectionString: connectionString as string,
         namespace,
         requireWriterAuthority: true,
         validateControlAuthority: true,
         attemptLeaseSeconds: 20,
         writeBatchMaxDelayMs: 1,
+        liveLogPartitions: 3,
+        liveLogReplicationFactor: 1,
       }),
     ]
     const dispose = async (): Promise<void> => {

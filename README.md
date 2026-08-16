@@ -9,13 +9,13 @@ This is a separate project from Pi Cloud. Pi Cloud remains the Pi-based referenc
 The runnable cloud slice provides:
 
 - the official DSH Web profile and frontend;
-- a PostgreSQL implementation of DSH's native `SessionPersistence` contract with one compressed immutable segment per settled Turn;
-- a bounded hot tail and transactional Outbox for unfinished native DSH events;
-- Kafka `acks=all` event publication and a rebuildable Valkey live projection before browser visibility;
+- a Cordis `SessionPersistence` plugin with one compressed immutable PostgreSQL segment per settled Turn;
+- a replaceable `SessionLiveLog` Provider (Kafka by default) for the exact unfinished native event suffix;
+- a replaceable `SessionLiveProjection` Provider (Valkey by default) applied before browser visibility;
 - Workspace-scoped monotonic writer fencing for safe cross-Worker handoff;
 - a Cloud Web launcher that applies the cloud profile without modifying a user's normal DSH home;
 - remote implementations of DSH's native filesystem, subprocess, terminal, and sandbox services;
-- a trusted Sandbox Manager that derives Cube identity from Run authority and rejects stale fences;
+- a trusted Tool Broker that admits fenced Tool calls and routes them through a replaceable Cube provider;
 - one credential-free execution agent per CubeSandbox KVM;
 - public registration/login with tenant-filtered Session and Workspace APIs;
 - a PostgreSQL transactional Run queue with idempotent admission, per-Workspace serialization, fair claims, leases, fencing, cancellation, and crash reconciliation;
@@ -33,10 +33,10 @@ Browser (official DSH Web UI)
         v
 Multi-tenant Gateway
         |
-        +---- PostgreSQL auth / Run queue / Turn segments
+        +---- PostgreSQL auth / Run queue / sealed Turn segments
         |             ^
         |             |
-        |      Outbox -> Kafka -> Valkey live projection
+        |      Kafka active suffix -> Valkey live projection
         |
         +---- transactional Run claims
                     |
@@ -45,10 +45,13 @@ Multi-tenant Gateway
              Agent Loop + model auth
                     |
                     v
-          Remote fs/subprocess providers
+          Remote fs/subprocess plugins
                     |
                     v
-             CubeSandbox KVM
+              Tool Broker
+                    |
+                    v
+             CubeSandbox KVM provider
 ```
 
 The Session log is the model-context authority. PostgreSQL stores DSH's native events rather than a separately reconstructed `messages[]` array, so compaction, steering, tool outcomes, request headers, and interrupted-turn recovery keep upstream semantics. Temporal is intentionally not part of this design: Pi Cloud and DSH Cloud both use PostgreSQL as the sole product-state and Run-queue authority.
@@ -63,9 +66,8 @@ pnpm install
 pnpm build
 docker compose -f deploy/dev/compose.yaml up -d --wait postgres kafka valkey
 set -a; . ./.env; set +a
-pnpm start:manager
+pnpm start:broker
 # in separate terminals:
-pnpm start:relay
 pnpm start
 pnpm start:gateway
 ```
@@ -96,7 +98,7 @@ recorded in the [production acceptance report](docs/reports/production-acceptanc
 The one-host profile requires Docker Compose plus an existing CubeSandbox
 control/compute cluster and a Cube Volume driver. Set
 `DSH_CLOUD_CUBE_CONTROL_NETWORK` to the external Docker network that exposes
-the trusted Cube API relay named by `DSH_CLOUD_CUBE_API_URL`; the Manager joins
+the trusted Cube API relay named by `DSH_CLOUD_CUBE_API_URL`; the Tool Broker joins
 that network, while Workers and the Gateway do not. Build and publish the
 credential-free execution image, register it as described below, then run:
 
@@ -108,7 +110,7 @@ credential-free execution image, register it as described below, then run:
 
 The first invocation creates a mode-0600 environment file and generates the
 platform-owned secrets. The second validates the configuration, builds the
-Gateway/Worker/Manager/Relay images, starts PostgreSQL, Kafka, Valkey and two Workers, and waits for
+Gateway/Worker/Tool-Broker images, starts PostgreSQL, Kafka, Valkey and two Workers, and waits for
 the health gates. `./install.sh check` renders Compose without changing the
 deployment; `./install.sh down` stops services while retaining PostgreSQL and
 Worker profile volumes.
@@ -117,23 +119,22 @@ Important lifecycle values are deliberately shared across components:
 
 | Variable | Default | Contract |
 | --- | ---: | --- |
-| `DSH_CLOUD_RUN_LEASE_SECONDS` | 20 s | Used by both Worker reconciliation and Sandbox Manager authority checks; configure one identical value everywhere. |
+| `DSH_CLOUD_RUN_LEASE_SECONDS` | 20 s | Used by both Worker reconciliation and Tool Broker authority checks; configure one identical value everywhere. |
 | `DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS` | 540 s | Maximum graceful Run drain before Worker abort; must remain below the orchestrator termination grace period. |
 | `DSH_CLOUD_SANDBOX_IDLE_TTL_MS` | 30 min | Warm KVM lifetime after its last Tool operation; Workspace bytes remain in the Cube Volume. |
 | `DSH_CLOUD_WORKER_SLOTS` | 4 | Concurrent active Agent Runs admitted by one Worker process. |
 | `DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS` | 24 h | Retention of the rebuildable Valkey live projection; settled history remains in PostgreSQL Turn segments. |
-| `DSH_CLOUD_KAFKA_EVENT_RETENTION_MS` | 48 h | Durable live-publication horizon; it must exceed the Valkey replay window. Configure existing external topics to the same value. |
-| `DSH_CLOUD_RELAY_LEASE_SECONDS` | 60 s | Outbox publication ownership; it exceeds one 30-second Kafka delivery attempt plus Valkey/commit time. |
+| `DSH_CLOUD_KAFKA_EVENT_RETENTION_MS` | 30 d | Maximum recovery horizon for an unfinished Turn; it must exceed the Valkey replay window. Configure existing external topics to the same value. |
 | `DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS` | 90 s | Gateway visibility deadline; permits one bounded Kafka retry before failing closed. |
 
 Workers heartbeat every five seconds. The default 20-second Run lease therefore
 tolerates transient database delays while still fencing an abandoned Attempt
-quickly. Changing the lease in only the Manager or only the Workers is an
+quickly. Changing the lease in only the Tool Broker or only the Workers is an
 invalid deployment.
 
 ## Kubernetes deployment
 
-The Helm chart deploys independent Gateway, Worker, Session Event Relay and Sandbox Manager replica
+The Helm chart deploys independent Gateway, Worker and Tool Broker replica
 sets. PostgreSQL, Kafka, Valkey and Cube remain external authorities. KEDA scales only the
 Worker Deployment from the PostgreSQL ready-Run backlog; it is not a second
 scheduler and losing KEDA does not lose queued work.

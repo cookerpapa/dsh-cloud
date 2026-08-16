@@ -14,7 +14,7 @@ spec:
   egress:
     - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker } } }]
       ports: [{ protocol: TCP, port: 3080 }]
-    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } } }]
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: tool-broker } } }]
       ports: [{ protocol: TCP, port: 3090 }]
     - ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }, { protocol: TCP, port: 5432 }]
 ---
@@ -29,39 +29,26 @@ spec:
       ports: [{ protocol: TCP, port: 3080 }]
     - ports: [{ protocol: TCP, port: 9090 }]
   egress:
-    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } } }]
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: tool-broker } } }]
       ports: [{ protocol: TCP, port: 3090 }]
     - ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
         - { protocol: TCP, port: 443 }
         - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: {{ .Values.kafka.port }} }
+        - { protocol: TCP, port: {{ .Values.valkey.port }} }
         {{- if .Values.worker.proxy.enabled }}
         - { protocol: TCP, port: {{ .Values.worker.proxy.port }} }
         {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: { name: {{ .Release.Name }}-manager }
+metadata: { name: {{ .Release.Name }}-tool-broker }
 spec:
-  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } }
+  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: tool-broker } }
   policyTypes: [Ingress,Egress]
   ingress:
     - ports: [{ protocol: TCP, port: 3090 }]
   egress: [{ ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }, { protocol: TCP, port: {{ .Values.sandbox.cube.apiPort }} }, { protocol: TCP, port: {{ .Values.sandbox.cube.proxyPort }} }, { protocol: TCP, port: 443 }, { protocol: TCP, port: 5432 }] }]
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata: { name: {{ .Release.Name }}-session-event-relay }
-spec:
-  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: session-event-relay } }
-  policyTypes: [Ingress,Egress]
-  ingress: [{ ports: [{ protocol: TCP, port: 3091 }] }]
-  egress:
-    - ports:
-        - { protocol: UDP, port: 53 }
-        - { protocol: TCP, port: 53 }
-        - { protocol: TCP, port: 5432 }
-        - { protocol: TCP, port: {{ .Values.kafka.port }} }
-        - { protocol: TCP, port: {{ .Values.valkey.port }} }
 {{- end }}

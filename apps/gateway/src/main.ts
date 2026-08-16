@@ -5,10 +5,10 @@ const connectionString = process.env['DSH_CLOUD_DATABASE_URL']
 if (connectionString === undefined || connectionString.trim() === '') {
   throw new Error('DSH_CLOUD_DATABASE_URL is required')
 }
-const managerUrl = process.env['DSH_CLOUD_SANDBOX_MANAGER_URL']
-const managerToken = process.env['DSH_CLOUD_SANDBOX_MANAGER_TOKEN']
-if (managerUrl === undefined || managerToken === undefined) {
-  throw new Error('DSH_CLOUD_SANDBOX_MANAGER_URL and DSH_CLOUD_SANDBOX_MANAGER_TOKEN are required')
+const brokerUrl = process.env['DSH_CLOUD_TOOL_BROKER_URL']
+const brokerToken = process.env['DSH_CLOUD_TOOL_BROKER_TOKEN']
+if (brokerUrl === undefined || brokerToken === undefined) {
+  throw new Error('DSH_CLOUD_TOOL_BROKER_URL and DSH_CLOUD_TOOL_BROKER_TOKEN are required')
 }
 const configuredOrigin = process.env['DSH_CLOUD_PUBLIC_ORIGIN']?.trim()
 const pool = new Pool({
@@ -22,7 +22,7 @@ const gateway = new CloudGateway({
   ...(configuredOrigin === undefined || configuredOrigin === '' ? {} : { publicOrigin: configuredOrigin }),
   secureCookies: process.env['DSH_CLOUD_SECURE_COOKIES'] === '1',
   eventProjectionTimeoutMs: Number(process.env['DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS'] ?? 90_000),
-  sandboxManager: { url: managerUrl, token: managerToken },
+  toolBroker: { url: brokerUrl, token: brokerToken },
 })
 await gateway.initialize()
 await gateway.listen(

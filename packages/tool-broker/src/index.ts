@@ -30,7 +30,7 @@ const CANCELLATION_CLEANUP = new Set([
   'process.poll', 'process.terminate', 'terminal.poll', 'terminal.terminate',
 ])
 
-export interface SandboxManagerOptions {
+export interface ToolBrokerOptions {
   readonly pool: Pool
   readonly namespace: string
   readonly internalToken: string
@@ -65,12 +65,12 @@ function send(response: ServerResponse, status: number, value: unknown): void {
   response.end(output)
 }
 
-export class SandboxManager {
+export class ToolBroker {
   private readonly key: Buffer
 
-  constructor(private readonly options: SandboxManagerOptions) {
-    if (options.internalToken.length < 32) throw new Error('Sandbox Manager internal token must have at least 32 characters')
-    if (options.encryptionKey.byteLength !== 32) throw new Error('Sandbox Manager encryption key must contain exactly 32 bytes')
+  constructor(private readonly options: ToolBrokerOptions) {
+    if (options.internalToken.length < 32) throw new Error('Tool Broker internal token must have at least 32 characters')
+    if (options.encryptionKey.byteLength !== 32) throw new Error('Tool Broker encryption key must contain exactly 32 bytes')
     this.key = Buffer.from(options.encryptionKey)
   }
 
@@ -85,7 +85,7 @@ export class SandboxManager {
       )`)
       const state = await client.query<{ version: number }>('SELECT version FROM dsh_cloud_sandbox.schema_state WHERE singleton=true')
       const version = state.rows[0]?.version ?? 0
-      if (version > 1) throw new Error(`Sandbox Manager schema version ${version} is newer than this binary supports`)
+      if (version > 1) throw new Error(`Tool Broker schema version ${version} is newer than this binary supports`)
       if (version < 1) {
         await client.query(`
       CREATE TABLE IF NOT EXISTS dsh_cloud_sandbox.activations (

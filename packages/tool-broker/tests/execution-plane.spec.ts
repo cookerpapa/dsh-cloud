@@ -15,7 +15,7 @@ import RemoteSubprocessRuntime from '@dsh-cloud/subprocess-remote'
 import { ExecutionEngine } from '@dsh-cloud/execution-agent/engine'
 import { createExecutionAgent } from '@dsh-cloud/execution-agent'
 import { parseExecutionResponse, type ExecutionRequest, type ExecutionResponse } from '@dsh-cloud/execution-protocol'
-import { SandboxManager } from '../src/index.js'
+import { ToolBroker } from '../src/index.js'
 import CubeSandboxProvider from '../src/cube-provider.js'
 import type { ManagedSandbox, SandboxBinding, SandboxHandle, SandboxProvider } from '../src/provider.js'
 
@@ -122,7 +122,7 @@ function authority(workspace: string, fence: number, attempt = `attempt-${fence}
 async function setup(): Promise<{
   ctx: Context
   workspace: string
-  managerUrl: string
+  brokerUrl: string
   dispose: () => Promise<void>
 }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-cloud-execution-'))
@@ -146,8 +146,8 @@ async function setup(): Promise<{
 
   const pool = new Pool({ connectionString: databaseUrl, max: 4 })
   const namespace = `execution-${randomUUID()}`
-  const token = 'integration-sandbox-manager-token-32-characters'
-  const manager = new SandboxManager({
+  const token = 'integration-tool-broker-token-32-characters'
+  const broker = new ToolBroker({
     pool,
     namespace,
     internalToken: token,
@@ -155,21 +155,21 @@ async function setup(): Promise<{
     provider: new AgentProvider(`http://127.0.0.1:${agentPort}`, resetAgent),
     authorityVerifier: async () => undefined,
   })
-  await manager.initialize()
-  const managerServer = manager.createServer()
-  const managerPort = await port()
-  await new Promise<void>((resolve, reject) => { managerServer.once('error', reject); managerServer.listen(managerPort, '127.0.0.1', resolve) })
+  await broker.initialize()
+  const brokerServer = broker.createServer()
+  const brokerPort = await port()
+  await new Promise<void>((resolve, reject) => { brokerServer.once('error', reject); brokerServer.listen(brokerPort, '127.0.0.1', resolve) })
 
   const ctx = new Context()
   const fibers = [
     await ctx.plugin(CloudRunContext),
-    await ctx.plugin(CloudExecutionClient, { managerUrl: `http://127.0.0.1:${managerPort}`, internalToken: token }),
+    await ctx.plugin(CloudExecutionClient, { brokerUrl: `http://127.0.0.1:${brokerPort}`, internalToken: token }),
     await ctx.plugin(RemoteFileSystem, { workspaceRoot: workspace }),
     await ctx.plugin(RemoteSubprocessRuntime),
   ]
   const dispose = async (): Promise<void> => {
     for (const fiber of fibers.reverse()) await fiber.dispose()
-    await new Promise<void>(resolve => managerServer.close(() => resolve()))
+    await new Promise<void>(resolve => brokerServer.close(() => resolve()))
     await new Promise<void>(resolve => agent.close(() => resolve()))
     await engine.dispose()
     await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace = $1', [namespace])
@@ -177,7 +177,7 @@ async function setup(): Promise<{
     await rm(root, { recursive: true, force: true })
   }
   cleanups.push(dispose)
-  return { ctx, workspace, managerUrl: `http://127.0.0.1:${managerPort}`, dispose }
+  return { ctx, workspace, brokerUrl: `http://127.0.0.1:${brokerPort}`, dispose }
 }
 
 describe('Cube provider contract', () => {
@@ -243,19 +243,19 @@ integration('remote DSH execution plane', () => {
     const pool = new Pool({ connectionString: databaseUrl, max: 4 })
     const namespace = `singleflight-${randomUUID()}`
     const provider = new SlowProvider()
-    const manager = new SandboxManager({
+    const broker = new ToolBroker({
       pool,
       namespace,
-      internalToken: 'integration-sandbox-manager-token-32-characters',
+      internalToken: 'integration-tool-broker-token-32-characters',
       encryptionKey: randomBytes(32),
       provider,
       authorityVerifier: async () => undefined,
     })
-    await manager.initialize()
+    await broker.initialize()
     const runAuthority = authority('workspace-singleflight', 1)
     const operation = { kind: 'fs.list', path: '/workspace' } as const
     try {
-      const responses = await Promise.all([1, 2].map(index => manager.execute({
+      const responses = await Promise.all([1, 2].map(index => broker.execute({
         protocolVersion: 1,
         operationId: `parallel-${index}`,
         authority: runAuthority,
@@ -278,17 +278,17 @@ integration('remote DSH execution plane', () => {
     const workspace = await store.createWorkspace(principal.tenantId, 'Disposable')
     expect(await store.beginWorkspaceDeletion(principal.tenantId, workspace.id)).toBe(true)
     const provider = new SlowProvider()
-    const manager = new SandboxManager({
+    const broker = new ToolBroker({
       pool,
       namespace,
-      internalToken: 'integration-sandbox-manager-token-32-characters',
+      internalToken: 'integration-tool-broker-token-32-characters',
       encryptionKey: randomBytes(32),
       provider,
       authorityVerifier: async () => undefined,
     })
-    await manager.initialize()
+    await broker.initialize()
     try {
-      await manager.destroyWorkspace(principal.tenantId, workspace.id)
+      await broker.destroyWorkspace(principal.tenantId, workspace.id)
       expect(provider.deletedWorkspaces).toEqual([{ tenantId: principal.tenantId, workspaceId: workspace.id }])
       expect(await store.workspaceOwned(principal.tenantId, workspace.id)).toBe(false)
     } finally {
@@ -307,19 +307,19 @@ integration('remote DSH execution plane', () => {
     expect(await store.beginWorkspaceDeletion(principal.tenantId, workspace.id)).toBe(true)
     const provider = new SlowProvider()
     provider.deleteFailuresRemaining = 1
-    const manager = new SandboxManager({
+    const broker = new ToolBroker({
       pool,
       namespace,
-      internalToken: 'integration-sandbox-manager-token-32-characters',
+      internalToken: 'integration-tool-broker-token-32-characters',
       encryptionKey: randomBytes(32),
       provider,
       authorityVerifier: async () => undefined,
     })
-    await manager.initialize()
+    await broker.initialize()
     try {
-      await expect(manager.destroyWorkspace(principal.tenantId, workspace.id)).rejects.toThrow(/injected/)
+      await expect(broker.destroyWorkspace(principal.tenantId, workspace.id)).rejects.toThrow(/injected/)
       expect(await store.workspaceOwned(principal.tenantId, workspace.id)).toBe(false)
-      await expect(manager.destroyWorkspace(principal.tenantId, workspace.id)).resolves.toBeUndefined()
+      await expect(broker.destroyWorkspace(principal.tenantId, workspace.id)).resolves.toBeUndefined()
       expect(provider.deletedWorkspaces).toEqual([{ tenantId: principal.tenantId, workspaceId: workspace.id }])
     } finally {
       await pool.query('DELETE FROM dsh_cloud_control.tenants WHERE namespace=$1', [namespace])
@@ -334,17 +334,17 @@ integration('remote DSH execution plane', () => {
       activationId: randomUUID(),
       handle: { provider: 'cubesandbox-kvm', sandboxId: 'orphan-cube', endpoint: '' },
     }])
-    const manager = new SandboxManager({
+    const broker = new ToolBroker({
       pool,
       namespace,
-      internalToken: 'integration-sandbox-manager-token-32-characters',
+      internalToken: 'integration-tool-broker-token-32-characters',
       encryptionKey: randomBytes(32),
       provider,
       authorityVerifier: async () => undefined,
     })
-    await manager.initialize()
+    await broker.initialize()
     try {
-      await expect(manager.reconcile(60_000)).resolves.toEqual({ destroyed: 0, missing: 0, orphaned: 1 })
+      await expect(broker.reconcile(60_000)).resolves.toEqual({ destroyed: 0, missing: 0, orphaned: 1 })
       expect(provider.destroyed).toEqual(['orphan-cube'])
     } finally {
       await pool.query('DELETE FROM dsh_cloud_sandbox.activations WHERE namespace=$1', [namespace])

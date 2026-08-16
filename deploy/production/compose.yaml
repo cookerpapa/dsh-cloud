@@ -10,8 +10,15 @@ x-worker-environment: &worker-environment
   DSH_CLOUD_WORKER_SLOTS: ${DSH_CLOUD_WORKER_SLOTS:-4}
   DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS: ${DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS:-540000}
   DSH_CLOUD_RUN_LEASE_SECONDS: ${DSH_CLOUD_RUN_LEASE_SECONDS:-20}
-  DSH_CLOUD_SANDBOX_MANAGER_URL: http://manager:3090
-  DSH_CLOUD_SANDBOX_MANAGER_TOKEN: ${DSH_CLOUD_SANDBOX_MANAGER_TOKEN:?manager token is required}
+  DSH_CLOUD_TOOL_BROKER_URL: http://tool-broker:3090
+  DSH_CLOUD_TOOL_BROKER_TOKEN: ${DSH_CLOUD_TOOL_BROKER_TOKEN:?tool broker token is required}
+  DSH_CLOUD_KAFKA_BROKERS: kafka:9092
+  DSH_CLOUD_KAFKA_SESSION_TOPIC: ${DSH_CLOUD_KAFKA_SESSION_TOPIC:-dsh-cloud-session-events-v2}
+  DSH_CLOUD_KAFKA_PARTITIONS: ${DSH_CLOUD_KAFKA_PARTITIONS:-12}
+  DSH_CLOUD_KAFKA_REPLICATION_FACTOR: ${DSH_CLOUD_KAFKA_REPLICATION_FACTOR:-1}
+  DSH_CLOUD_KAFKA_EVENT_RETENTION_MS: ${DSH_CLOUD_KAFKA_EVENT_RETENTION_MS:-2592000000}
+  DSH_CLOUD_VALKEY_URL: redis://valkey:6379
+  DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS: ${DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS:-86400}
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?DeepSeek API key is required}
   DSH_HOME: /var/lib/dsh
 
@@ -75,45 +82,18 @@ services:
       - valkey-data:/data
     networks: [platform]
 
-  session-event-relay:
+  tool-broker:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.services
-      target: relay
-    restart: unless-stopped
-    depends_on:
-      postgres: { condition: service_healthy }
-      kafka: { condition: service_healthy }
-      valkey: { condition: service_healthy }
-    environment:
-      DSH_CLOUD_DATABASE_URL: postgresql://dsh_cloud:${POSTGRES_PASSWORD}@postgres:5432/dsh_cloud
-      DSH_CLOUD_NAMESPACE: ${DSH_CLOUD_NAMESPACE:-production}
-      DSH_CLOUD_KAFKA_BROKERS: kafka:9092
-      DSH_CLOUD_KAFKA_SESSION_TOPIC: ${DSH_CLOUD_KAFKA_SESSION_TOPIC:-dsh-cloud-session-events-v1}
-      DSH_CLOUD_KAFKA_PARTITIONS: ${DSH_CLOUD_KAFKA_PARTITIONS:-12}
-      DSH_CLOUD_KAFKA_EVENT_RETENTION_MS: ${DSH_CLOUD_KAFKA_EVENT_RETENTION_MS:-172800000}
-      DSH_CLOUD_VALKEY_URL: redis://valkey:6379
-      DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS: ${DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS:-86400}
-      DSH_CLOUD_RELAY_LEASE_SECONDS: ${DSH_CLOUD_RELAY_LEASE_SECONDS:-60}
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3091/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-    networks: [platform]
-
-  manager:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.services
-      target: manager
+      target: tool-broker
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
     environment:
       DSH_CLOUD_DATABASE_URL: postgresql://dsh_cloud:${POSTGRES_PASSWORD}@postgres:5432/dsh_cloud
       DSH_CLOUD_NAMESPACE: ${DSH_CLOUD_NAMESPACE:-production}
-      DSH_CLOUD_SANDBOX_MANAGER_TOKEN: ${DSH_CLOUD_SANDBOX_MANAGER_TOKEN:?manager token is required}
+      DSH_CLOUD_TOOL_BROKER_TOKEN: ${DSH_CLOUD_TOOL_BROKER_TOKEN:?tool broker token is required}
       DSH_CLOUD_SANDBOX_ENCRYPTION_KEY: ${DSH_CLOUD_SANDBOX_ENCRYPTION_KEY:?encryption key is required}
       DSH_CLOUD_CUBE_API_URL: ${DSH_CLOUD_CUBE_API_URL:?Cube API URL is required}
       DSH_CLOUD_CUBE_API_KEY: ${DSH_CLOUD_CUBE_API_KEY:?Cube API key is required}
@@ -141,7 +121,9 @@ services:
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
-      manager: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+      tool-broker: { condition: service_healthy }
     volumes:
       - worker-1-home:/var/lib/dsh
     networks: [platform]
@@ -156,7 +138,9 @@ services:
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
-      manager: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      valkey: { condition: service_healthy }
+      tool-broker: { condition: service_healthy }
     volumes:
       - worker-2-home:/var/lib/dsh
     networks: [platform]
@@ -174,7 +158,6 @@ services:
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
-      session-event-relay: { condition: service_healthy }
       worker-1: { condition: service_started }
       worker-2: { condition: service_started }
     environment:
@@ -185,8 +168,8 @@ services:
       DSH_CLOUD_SECURE_COOKIES: ${DSH_CLOUD_SECURE_COOKIES:-0}
       DSH_CLOUD_PUBLIC_ORIGIN: ${DSH_CLOUD_PUBLIC_ORIGIN:-}
       DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS: ${DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS:-90000}
-      DSH_CLOUD_SANDBOX_MANAGER_URL: http://manager:3090
-      DSH_CLOUD_SANDBOX_MANAGER_TOKEN: ${DSH_CLOUD_SANDBOX_MANAGER_TOKEN:?manager token is required}
+      DSH_CLOUD_TOOL_BROKER_URL: http://tool-broker:3090
+      DSH_CLOUD_TOOL_BROKER_TOKEN: ${DSH_CLOUD_TOOL_BROKER_TOKEN:?tool broker token is required}
     ports:
       - "${DSH_CLOUD_HTTP_BIND:-127.0.0.1}:${DSH_CLOUD_HTTP_PORT:-8080}:8080"
     healthcheck:

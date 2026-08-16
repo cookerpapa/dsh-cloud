@@ -30,8 +30,8 @@
     - id: cloud-execution-client
       name: '@dsh-cloud/execution-client'
       config:
-        managerUrl: !!js process.env.DSH_CLOUD_SANDBOX_MANAGER_URL
-        internalToken: !!js process.env.DSH_CLOUD_SANDBOX_MANAGER_TOKEN
+        brokerUrl: !!js process.env.DSH_CLOUD_TOOL_BROKER_URL
+        internalToken: !!js process.env.DSH_CLOUD_TOOL_BROKER_TOKEN
         requestTimeoutMs: 300000
 
     - id: cloud-subprocess
@@ -43,8 +43,24 @@
     - id: cloud-sandbox
       name: '@dsh-cloud/sandbox-remote'
 
-    - id: session-persistence-postgres
-      name: '@dsh-cloud/session-persistence-postgres'
+    # The active Session suffix and its low-latency projection are independent
+    # Cordis capabilities. Deployments may replace Kafka or Valkey without
+    # changing DSH's SessionPersistence implementation.
+    - id: session-live-log-kafka
+      name: '@dsh-cloud/session-live-kafka'
+      config:
+        brokers: !!js process.env.DSH_CLOUD_KAFKA_BROKERS
+        topic: !!js process.env.DSH_CLOUD_KAFKA_SESSION_TOPIC ?? 'dsh-cloud-session-events-v2'
+        clientId: dsh-cloud-worker
+
+    - id: session-live-projection-valkey
+      name: '@dsh-cloud/session-live-valkey'
+      config:
+        url: !!js process.env.DSH_CLOUD_VALKEY_URL
+        retentionSeconds: !!js Number(process.env.DSH_CLOUD_LIVE_EVENT_RETENTION_SECONDS ?? '86400')
+
+    - id: session-persistence-cloud
+      name: '@dsh-cloud/session-persistence-tiered'
       config:
         connectionString: !!js process.env.DSH_CLOUD_DATABASE_URL
         namespace: !!js process.env.DSH_CLOUD_NAMESPACE ?? 'local'
@@ -53,3 +69,6 @@
         attemptLeaseSeconds: !!js Number(process.env.DSH_CLOUD_RUN_LEASE_SECONDS ?? '20')
         maxPoolSize: 10
         writeBatchMaxDelayMs: 40
+        liveLogPartitions: !!js Number(process.env.DSH_CLOUD_KAFKA_PARTITIONS ?? '12')
+        liveLogReplicationFactor: !!js Number(process.env.DSH_CLOUD_KAFKA_REPLICATION_FACTOR ?? '1')
+        liveLogRetentionMs: !!js Number(process.env.DSH_CLOUD_KAFKA_EVENT_RETENTION_MS ?? '2592000000')

@@ -15,7 +15,7 @@ already fulfilled by the upstream DSH runtime.
 | Untrusted effects | fenced Tool RPC into Cube KVM | fenced native fs/subprocess providers into Cube KVM |
 | Workspace bytes | persistent Cube Volume | persistent Cube Volume |
 | Active model context | Pi SessionStorage | native DSH SessionPersistence |
-| Live publication | Kafka, then Valkey/SSE projection | PostgreSQL Outbox, Kafka, then Valkey/WebSocket projection |
+| Live publication | Kafka, then Valkey/SSE projection | pluggable Kafka live log, then Valkey/WebSocket projection |
 | Stale Writer defense | Workspace fence checked at commits and Tools | Workspace fence checked at Session appends, terminal commits and Tools |
 | Ambiguous shell outcome | never blindly replayed | the Run queue never replays a prompt after its dispatch boundary |
 
@@ -33,18 +33,19 @@ token deltas can therefore age out of Kafka/Valkey after canonical messages are
 committed to PostgreSQL.
 
 DSH's native Session events are simultaneously its Harness recovery log and its
-browser protocol. DSH Cloud consequently preserves the exact native sequence in
-PostgreSQL, but changes its physical shape at a settled Turn boundary:
+browser protocol. DSH Cloud consequently preserves the exact native sequence,
+but changes its physical medium at a settled Turn boundary:
 
 ```text
-unfinished Turn: bounded hot rows + transactional Outbox
-settled Turn:    one immutable native gzip segment
-live delivery:   bounded Kafka + Valkey horizon
+unfinished Turn: exact live-log suffix + PostgreSQL opaque location/digest metadata
+settled Turn:    one immutable native PostgreSQL gzip segment
+live delivery:   Kafka durable ACK + Valkey ordered projection
 ```
 
-Kafka and Valkey do not become another SessionStorage authority. They establish
-the durable live-visibility boundary and provide a bounded replay projection;
-the compressed PostgreSQL segment remains the long-term DSH recovery source.
+The official `SessionPersistence` contract remains the logical authority: its
+sealed PostgreSQL prefix and indexed live-log suffix form one contiguous native
+log. Valkey is rebuildable. Both live media are Cordis Provider seams, so this
+policy does not embed Kafka or Valkey clients in DSH's Session backend.
 
 ### Worker affinity as a transport constraint
 

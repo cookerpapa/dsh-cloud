@@ -17,13 +17,13 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export interface Config {
-  managerUrl?: string
+  brokerUrl?: string
   internalToken?: string
   requestTimeoutMs?: number
 }
 
 interface ResolvedConfig {
-  managerUrl: string
+  brokerUrl: string
   internalToken: string
   requestTimeoutMs: number
 }
@@ -59,7 +59,7 @@ export class ExecutionRemoteError extends Error {
 class CloudExecutionClient extends Service {
   static inject = ['cloudRunContext']
   static Config: z<Config> = z.object({
-    managerUrl: z.string(),
+    brokerUrl: z.string(),
     internalToken: z.string(),
     requestTimeoutMs: z.number().default(30_000),
   })
@@ -68,15 +68,15 @@ class CloudExecutionClient extends Service {
 
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'cloudExecution')
-    const managerUrl = config.managerUrl ?? process.env['DSH_CLOUD_SANDBOX_MANAGER_URL'] ?? ''
-    const internalToken = config.internalToken ?? process.env['DSH_CLOUD_SANDBOX_MANAGER_TOKEN'] ?? ''
+    const brokerUrl = config.brokerUrl ?? process.env['DSH_CLOUD_TOOL_BROKER_URL'] ?? ''
+    const internalToken = config.internalToken ?? process.env['DSH_CLOUD_TOOL_BROKER_TOKEN'] ?? ''
     const requestTimeoutMs = config.requestTimeoutMs ?? 30_000
-    if (!/^https?:\/\//.test(managerUrl)) throw new Error('cloud execution requires an HTTP(S) Sandbox Manager URL')
-    if (internalToken.length < 32) throw new Error('cloud execution requires a Sandbox Manager token of at least 32 characters')
+    if (!/^https?:\/\//.test(brokerUrl)) throw new Error('cloud execution requires an HTTP(S) Tool Broker URL')
+    if (internalToken.length < 32) throw new Error('cloud execution requires a Tool Broker token of at least 32 characters')
     if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 100 || requestTimeoutMs > 300_000) {
       throw new Error('cloud execution request timeout is invalid')
     }
-    this.config = { managerUrl: managerUrl.replace(/\/$/, ''), internalToken, requestTimeoutMs }
+    this.config = { brokerUrl: brokerUrl.replace(/\/$/, ''), internalToken, requestTimeoutMs }
   }
 
   currentAuthority(): RunAuthority { return this.ctx.cloudRunContext.require() }
@@ -91,7 +91,7 @@ class CloudExecutionClient extends Service {
     }
     const timeout = AbortSignal.timeout(this.config.requestTimeoutMs)
     const combined = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
-    const response = await fetch(`${this.config.managerUrl}/v1/execute`, {
+    const response = await fetch(`${this.config.brokerUrl}/v1/execute`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${this.config.internalToken}`,
@@ -101,9 +101,9 @@ class CloudExecutionClient extends Service {
       signal: combined,
     })
     const bytes = await readBounded(response)
-    if (!response.ok) throw new Error(`Sandbox Manager rejected execution with HTTP ${response.status}`)
+    if (!response.ok) throw new Error(`Tool Broker rejected execution with HTTP ${response.status}`)
     let decoded: unknown
-    try { decoded = JSON.parse(bytes.toString('utf8')) as unknown } catch { throw new Error('Sandbox Manager returned invalid JSON') }
+    try { decoded = JSON.parse(bytes.toString('utf8')) as unknown } catch { throw new Error('Tool Broker returned invalid JSON') }
     const parsed = parseExecutionResponse(decoded, operationId)
     if (!parsed.ok) throw new ExecutionRemoteError(parsed.error.code, parsed.error.message, parsed.error.retryable)
     return parsed.result as T

@@ -15,11 +15,13 @@ enabled('PostgreSQL control authority', () => {
 
   beforeAll(async () => {
     await pool.query(`
+      BEGIN;
+      SELECT pg_advisory_xact_lock(hashtextextended('dsh_cloud.session-persistence:migration',0));
       CREATE SCHEMA IF NOT EXISTS dsh_cloud;
       CREATE TABLE IF NOT EXISTS dsh_cloud.schema_state (
         singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), version integer NOT NULL
       );
-      INSERT INTO dsh_cloud.schema_state(singleton,version) VALUES(true,3)
+      INSERT INTO dsh_cloud.schema_state(singleton,version) VALUES(true,5)
         ON CONFLICT(singleton) DO NOTHING;
       CREATE TABLE IF NOT EXISTS dsh_cloud.persistence_state(namespace text PRIMARY KEY,store_id uuid NOT NULL);
       CREATE TABLE IF NOT EXISTS dsh_cloud.sessions (
@@ -35,6 +37,7 @@ enabled('PostgreSQL control authority', () => {
         PRIMARY KEY(namespace,session_id,seq),
         FOREIGN KEY(namespace,session_id) REFERENCES dsh_cloud.sessions(namespace,id) ON DELETE CASCADE
       );
+      COMMIT;
     `)
     await store.initialize()
     const principal = await store.register('Tenant A', 'owner@example.test', 'correct horse battery staple')

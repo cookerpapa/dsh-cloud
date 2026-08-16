@@ -40,7 +40,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
       })
     })
     const workerPort=await listen(fake)
-    gateway=new CloudGateway({pool,namespace,secureCookies:false,sandboxManager:{url:`http://127.0.0.1:${workerPort}`,token:'test-manager-token'}})
+    gateway=new CloudGateway({pool,namespace,secureCookies:false,toolBroker:{url:`http://127.0.0.1:${workerPort}`,token:'test-tool-broker-token'}})
     await gateway.initialize()
     await gateway.store.heartbeatWorker({id:'worker-test',baseUrl:`http://127.0.0.1:${workerPort}`,maximumRuns:4})
     await gateway.listen(0,'127.0.0.1');baseUrl=`http://127.0.0.1:${gateway.address()!.port}`

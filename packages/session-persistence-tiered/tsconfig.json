@@ -6,6 +6,7 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../../packages/session-persistence-postgres" }
+    { "path": "../run-context" },
+    { "path": "../session-live" }
   ]
 }

@@ -10,5 +10,4 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- define "dsh-cloud.gatewayImage" -}}{{ .Values.images.gateway.repository }}:{{ .Values.images.gateway.tag }}{{- end -}}
 {{- define "dsh-cloud.workerImage" -}}{{ .Values.images.worker.repository }}:{{ .Values.images.worker.tag }}{{- end -}}
-{{- define "dsh-cloud.managerImage" -}}{{ .Values.images.manager.repository }}:{{ .Values.images.manager.tag }}{{- end -}}
-{{- define "dsh-cloud.relayImage" -}}{{ .Values.images.relay.repository }}:{{ .Values.images.relay.tag }}{{- end -}}
+{{- define "dsh-cloud.toolBrokerImage" -}}{{ .Values.images.toolBroker.repository }}:{{ .Values.images.toolBroker.tag }}{{- end -}}

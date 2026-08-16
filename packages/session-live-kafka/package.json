@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-cloud/session-live-kafka",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@confluentinc/kafka-javascript": "^1.10.0",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.17.1",
+    "@dsh-cloud/session-live": "workspace:*"
+  }
+}

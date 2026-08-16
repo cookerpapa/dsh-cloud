@@ -26,8 +26,8 @@ spec:
             - { name: DSH_CLOUD_GATEWAY_PORT, value: "8080" }
             - { name: DSH_CLOUD_SECURE_COOKIES, value: {{ ternary "1" "0" .Values.gateway.secureCookies | quote }} }
             - { name: DSH_CLOUD_EVENT_PROJECTION_TIMEOUT_MS, value: {{ .Values.gateway.eventProjectionTimeoutMs | quote }} }
-            - { name: DSH_CLOUD_SANDBOX_MANAGER_URL, value: http://{{ .Release.Name }}-manager:3090 }
-            - { name: DSH_CLOUD_SANDBOX_MANAGER_TOKEN, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.managerTokenKey }} } } }
+            - { name: DSH_CLOUD_TOOL_BROKER_URL, value: http://{{ .Release.Name }}-tool-broker:3090 }
+            - { name: DSH_CLOUD_TOOL_BROKER_TOKEN, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.brokerTokenKey }} } } }
             {{- if .Values.publicOrigin }}
             - { name: DSH_CLOUD_PUBLIC_ORIGIN, value: {{ .Values.publicOrigin | quote }} }
             {{- end }}

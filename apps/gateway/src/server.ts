@@ -30,7 +30,7 @@ interface GatewayOptions {
   publicOrigin?: string
   secureCookies: boolean
   eventProjectionTimeoutMs?: number
-  sandboxManager?: { url: string; token: string }
+  toolBroker?: { url: string; token: string }
 }
 
 function cookies(request: IncomingMessage): Record<string, string> {
@@ -314,13 +314,13 @@ export class CloudGateway {
   private async proxy(worker:WorkerRecord,request:IncomingMessage,response:ServerResponse,body:Buffer):Promise<void>{await copyResponse(await this.fetchWorker(worker,new URL(request.url??'/','http://gateway').pathname+new URL(request.url??'/','http://gateway').search,request,body),response)}
 
   private async destroyWorkspace(tenantId:string,workspaceId:string):Promise<void>{
-    const manager=this.options.sandboxManager
-    if(manager===undefined)throw Object.assign(new Error('Sandbox Manager is not configured for Workspace deletion'),{status:503})
-    const response=await fetch(`${manager.url.replace(/\/$/,'')}/v1/workspaces/destroy`,{
-      method:'POST',headers:{authorization:`Bearer ${manager.token}`,'content-type':'application/json'},
+    const broker=this.options.toolBroker
+    if(broker===undefined)throw Object.assign(new Error('Tool Broker is not configured for Workspace deletion'),{status:503})
+    const response=await fetch(`${broker.url.replace(/\/$/,'')}/v1/workspaces/destroy`,{
+      method:'POST',headers:{authorization:`Bearer ${broker.token}`,'content-type':'application/json'},
       body:JSON.stringify({tenantId,workspaceId}),signal:AbortSignal.timeout(120_000),
     })
-    if(!response.ok){await response.body?.cancel();throw Object.assign(new Error('Sandbox Manager could not destroy the Workspace'),{status:503})}
+    if(!response.ok){await response.body?.cancel();throw Object.assign(new Error('Tool Broker could not destroy the Workspace'),{status:503})}
     await response.body?.cancel()
   }
 

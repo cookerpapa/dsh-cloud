@@ -11,10 +11,12 @@
     { "path": "./packages/fs-remote" },
     { "path": "./packages/subprocess-remote" },
     { "path": "./packages/sandbox-remote" },
-    { "path": "./packages/sandbox-manager" },
-    { "path": "./packages/session-persistence-postgres" },
+    { "path": "./packages/tool-broker" },
+    { "path": "./packages/session-live" },
+    { "path": "./packages/session-live-kafka" },
+    { "path": "./packages/session-live-valkey" },
+    { "path": "./packages/session-persistence-tiered" },
     { "path": "./apps/cloud-web" },
-    { "path": "./apps/gateway" },
-    { "path": "./apps/session-event-relay" }
+    { "path": "./apps/gateway" }
   ]
 }

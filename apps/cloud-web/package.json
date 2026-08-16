@@ -13,7 +13,9 @@
     "@dsh-cloud/run-context": "workspace:*",
     "@dsh-cloud/run-queue": "workspace:*",
     "@dsh-cloud/sandbox-remote": "workspace:*",
-    "@dsh-cloud/session-persistence-postgres": "workspace:*",
+    "@dsh-cloud/session-live-kafka": "workspace:*",
+    "@dsh-cloud/session-live-valkey": "workspace:*",
+    "@dsh-cloud/session-persistence-tiered": "workspace:*",
     "@dsh-cloud/subprocess-remote": "workspace:*",
     "@dsh-cloud/web-bundle": "workspace:*",
     "pg": "^8.16.3"

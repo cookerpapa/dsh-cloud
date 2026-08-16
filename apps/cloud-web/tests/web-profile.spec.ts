@@ -6,7 +6,11 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const databaseUrl = process.env['DSH_CLOUD_TEST_DATABASE_URL']
-const integration = databaseUrl === undefined ? describe.skip : describe
+const kafkaBrokers = process.env['DSH_CLOUD_TEST_KAFKA_BROKERS']
+const valkeyUrl = process.env['DSH_CLOUD_TEST_VALKEY_URL']
+const integration = databaseUrl === undefined || kafkaBrokers === undefined || valkeyUrl === undefined
+  ? describe.skip
+  : describe
 const children = new Set<ChildProcess>()
 const temporaryHomes: string[] = []
 
@@ -66,7 +70,7 @@ function waitForWeb(child: ChildProcess, timeoutMs: number): Promise<string> {
 }
 
 integration('Cloud Web profile', () => {
-  it('serves the official DSH frontend with PostgreSQL persistence mounted', async () => {
+  it('serves the official DSH frontend with tiered Session persistence mounted', async () => {
     const repositoryRoot = resolve(import.meta.dirname, '../../..')
     const home = await mkdtemp(join(tmpdir(), 'dsh-cloud-web-'))
     temporaryHomes.push(home)
@@ -81,8 +85,13 @@ integration('Cloud Web profile', () => {
         DSH_HOME: home,
         DSH_CLOUD_DATABASE_URL: databaseUrl as string,
         DSH_CLOUD_NAMESPACE: `web-smoke-${port}`,
-        DSH_CLOUD_SANDBOX_MANAGER_URL: 'http://127.0.0.1:9',
-        DSH_CLOUD_SANDBOX_MANAGER_TOKEN: 'web-smoke-manager-token-32-characters',
+        DSH_CLOUD_KAFKA_BROKERS: kafkaBrokers as string,
+        DSH_CLOUD_KAFKA_SESSION_TOPIC: `dsh-cloud-web-smoke-${port}`,
+        DSH_CLOUD_KAFKA_PARTITIONS: '3',
+        DSH_CLOUD_KAFKA_REPLICATION_FACTOR: '1',
+        DSH_CLOUD_VALKEY_URL: valkeyUrl as string,
+        DSH_CLOUD_TOOL_BROKER_URL: 'http://127.0.0.1:9',
+        DSH_CLOUD_TOOL_BROKER_TOKEN: 'web-smoke-tool-broker-token-32-characters',
         DSH_CLOUD_HOST: '127.0.0.1',
         DSH_CLOUD_PORT: String(port),
       },

@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-cloud/session-persistence-postgres",
+  "name": "@dsh-cloud/session-live-valkey",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -14,14 +14,8 @@
   },
   "dependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-session-persistence": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.17.1",
-    "@dsh-cloud/run-context": "workspace:*",
-    "pg": "^8.16.3"
-  },
-  "devDependencies": {
-    "@deepseek-ai/dsh-llm": "0.1.0-rc.6",
-    "@types/pg": "^8.15.5"
+    "@dsh-cloud/session-live": "workspace:*",
+    "iovalkey": "0.4.0"
   }
 }

@@ -5,11 +5,8 @@ images:
   worker:
     repository: ghcr.io/example/dsh-cloud-worker
     tag: latest
-  manager:
-    repository: ghcr.io/example/dsh-cloud-manager
-    tag: latest
-  relay:
-    repository: ghcr.io/example/dsh-cloud-session-event-relay
+  toolBroker:
+    repository: ghcr.io/example/dsh-cloud-tool-broker
     tag: latest
   pullPolicy: IfNotPresent
 
@@ -48,26 +45,19 @@ worker:
     httpProxy: ""
     httpsProxy: ""
     noProxy: "127.0.0.1,localhost,.svc,.cluster.local"
-manager:
+toolBroker:
   replicas: 3
   idleTtlMs: 1800000
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: "1", memory: 512Mi }
-relay:
-  replicas: 2
-  leaseSeconds: 60
-  resources:
-    requests: { cpu: 100m, memory: 128Mi }
-    limits: { cpu: "1", memory: 512Mi }
-
 kafka:
   brokers: "kafka.kafka.svc:9092"
   port: 9092
-  topic: dsh-cloud-session-events-v1
+  topic: dsh-cloud-session-events-v2
   partitions: 48
   replicationFactor: 3
-  eventRetentionMs: "172800000"
+  eventRetentionMs: "2592000000"
 valkey:
   url: "redis://valkey.valkey.svc:6379"
   port: 6379
@@ -78,7 +68,7 @@ postgres:
   urlKey: database-url
 sandbox:
   secretName: dsh-cloud-sandbox
-  managerTokenKey: manager-token
+  brokerTokenKey: broker-token
   encryptionKeyKey: encryption-key
   cubeApiKeyKey: cube-api-key
   cube:

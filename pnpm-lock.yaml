@@ -20,12 +20,12 @@ importers:
       '@dsh-cloud/run-queue':
         specifier: workspace:*
         version: link:packages/run-queue
-      '@dsh-cloud/sandbox-manager':
+      '@dsh-cloud/session-persistence-tiered':
         specifier: workspace:*
-        version: link:packages/sandbox-manager
-      '@dsh-cloud/session-persistence-postgres':
+        version: link:packages/session-persistence-tiered
+      '@dsh-cloud/tool-broker':
         specifier: workspace:*
-        version: link:packages/session-persistence-postgres
+        version: link:packages/tool-broker
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -36,6 +36,12 @@ importers:
       '@deepseek-ai/dsh-session':
         specifier: 0.1.0-rc.6
         version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
+      '@dsh-cloud/session-live-kafka':
+        specifier: workspace:*
+        version: link:packages/session-live-kafka
+      '@dsh-cloud/session-live-valkey':
+        specifier: workspace:*
+        version: link:packages/session-live-valkey
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -84,9 +90,15 @@ importers:
       '@dsh-cloud/sandbox-remote':
         specifier: workspace:*
         version: link:../../packages/sandbox-remote
-      '@dsh-cloud/session-persistence-postgres':
+      '@dsh-cloud/session-live-kafka':
         specifier: workspace:*
-        version: link:../../packages/session-persistence-postgres
+        version: link:../../packages/session-live-kafka
+      '@dsh-cloud/session-live-valkey':
+        specifier: workspace:*
+        version: link:../../packages/session-live-valkey
+      '@dsh-cloud/session-persistence-tiered':
+        specifier: workspace:*
+        version: link:../../packages/session-persistence-tiered
       '@dsh-cloud/subprocess-remote':
         specifier: workspace:*
         version: link:../../packages/subprocess-remote
@@ -122,25 +134,6 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
-
-  apps/session-event-relay:
-    dependencies:
-      '@confluentinc/kafka-javascript':
-        specifier: 1.10.0
-        version: 1.10.0
-      '@dsh-cloud/session-persistence-postgres':
-        specifier: workspace:*
-        version: link:../../packages/session-persistence-postgres
-      iovalkey:
-        specifier: 0.4.0
-        version: 0.4.0
-      pg:
-        specifier: ^8.16.3
-        version: 8.23.0
-    devDependencies:
-      '@types/pg':
-        specifier: ^8.15.5
-        version: 8.21.0
 
   packages/cloud-bundle: {}
 
@@ -255,7 +248,107 @@ importers:
         specifier: ^8.15.5
         version: 8.21.0
 
-  packages/sandbox-manager:
+  packages/sandbox-remote:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-sandbox':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-llm@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))))(@deepseek-ai/dsh-session@0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6))
+
+  packages/session-live:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
+
+  packages/session-live-kafka:
+    dependencies:
+      '@confluentinc/kafka-javascript':
+        specifier: ^1.10.0
+        version: 1.10.0
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
+      '@dsh-cloud/session-live':
+        specifier: workspace:*
+        version: link:../session-live
+
+  packages/session-live-valkey:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
+      '@dsh-cloud/session-live':
+        specifier: workspace:*
+        version: link:../session-live
+      iovalkey:
+        specifier: 0.4.0
+        version: 0.4.0
+
+  packages/session-persistence-tiered:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
+      '@deepseek-ai/dsh-session-persistence':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-session@0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
+      '@dsh-cloud/run-context':
+        specifier: workspace:*
+        version: link:../run-context
+      '@dsh-cloud/session-live':
+        specifier: workspace:*
+        version: link:../session-live
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@deepseek-ai/dsh-llm':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
+      '@dsh-cloud/session-live-kafka':
+        specifier: workspace:*
+        version: link:../session-live-kafka
+      '@dsh-cloud/session-live-valkey':
+        specifier: workspace:*
+        version: link:../session-live-valkey
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+
+  packages/subprocess-remote:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-subprocess':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))
+      '@dsh-cloud/execution-client':
+        specifier: workspace:*
+        version: link:../execution-client
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:../execution-protocol
+
+  packages/tool-broker:
     dependencies:
       '@dsh-cloud/execution-protocol':
         specifier: workspace:*
@@ -288,58 +381,6 @@ importers:
       '@types/pg':
         specifier: ^8.15.5
         version: 8.21.0
-
-  packages/sandbox-remote:
-    dependencies:
-      '@deepseek-ai/cordis':
-        specifier: ^4.0.1
-        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
-      '@deepseek-ai/dsh-sandbox':
-        specifier: 0.1.0-rc.6
-        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-llm@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))))(@deepseek-ai/dsh-session@0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6))
-
-  packages/session-persistence-postgres:
-    dependencies:
-      '@deepseek-ai/cordis':
-        specifier: ^4.0.1
-        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
-      '@deepseek-ai/dsh-session':
-        specifier: 0.1.0-rc.6
-        version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
-      '@deepseek-ai/dsh-session-persistence':
-        specifier: 0.1.0-rc.6
-        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-session@0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
-      '@deepseek-ai/schemastery':
-        specifier: ^3.17.1
-        version: 3.18.1
-      '@dsh-cloud/run-context':
-        specifier: workspace:*
-        version: link:../run-context
-      pg:
-        specifier: ^8.16.3
-        version: 8.23.0
-    devDependencies:
-      '@deepseek-ai/dsh-llm':
-        specifier: 0.1.0-rc.6
-        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
-      '@types/pg':
-        specifier: ^8.15.5
-        version: 8.21.0
-
-  packages/subprocess-remote:
-    dependencies:
-      '@deepseek-ai/cordis':
-        specifier: ^4.0.1
-        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
-      '@deepseek-ai/dsh-subprocess':
-        specifier: 0.1.0-rc.6
-        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))
-      '@dsh-cloud/execution-client':
-        specifier: workspace:*
-        version: link:../execution-client
-      '@dsh-cloud/execution-protocol':
-        specifier: workspace:*
-        version: link:../execution-protocol
 
 packages:
 
