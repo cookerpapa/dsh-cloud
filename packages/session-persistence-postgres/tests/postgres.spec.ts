@@ -8,6 +8,7 @@ import {
   type SessionHeader,
 } from '@deepseek-ai/dsh-session'
 import { MessageId, createMessage } from '@deepseek-ai/dsh-llm'
+import { Pool } from 'pg'
 import { afterEach, describe, expect, it } from 'vitest'
 import CloudRunContext, {
   cloudIdentifier,
@@ -173,5 +174,79 @@ integration('PostgresSessionPersistence', () => {
     const final = loaded.events.at(-1)
     expect(final?.type === 'turn/end' ? final.data.reason : undefined)
       .toEqual({ kind: 'interrupted' })
+  })
+
+  it('packs token-sized assistant deltas without changing the native DSH log', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const meta = header('packed-chunks')
+    const chunks: SessionEvent[] = Array.from({ length: 50 }, (_, index) => ({
+      type: 'assistant/chunk',
+      seq: index + 3,
+      time: 10 + index,
+      data: {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'reasoning-delta', index: 0, text: `token-${index}` },
+      },
+    }))
+    const log: SessionEvent[] = [
+      { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      {
+        type: 'user/message',
+        seq: 1,
+        time: 2,
+        data: createMessage({
+          id: MessageId('user-packed'),
+          role: 'user',
+          content: [{ type: 'text', text: 'stream a long answer' }],
+          source: { kind: 'user' },
+        }),
+        surfaceOp: 'append',
+      },
+      { type: 'step/start', seq: 2, time: 3, data: { turn: 1, step: 1 } },
+      ...chunks,
+      {
+        type: 'assistant/message',
+        seq: 53,
+        time: 61,
+        surfaceOp: 'append',
+        sourceEventSeqs: chunks.map(event => event.seq),
+        data: {
+          turn: 1,
+          step: 1,
+          message: createMessage({
+            id: MessageId('assistant-packed'),
+            role: 'assistant',
+            content: [{ type: 'reasoning', text: chunks.map(event =>
+              event.type === 'assistant/chunk' && 'text' in event.data.chunk
+                ? event.data.chunk.text
+                : '').join('') }],
+            source: { kind: 'model', provider: 'test', model: 'test' },
+          }),
+        },
+      },
+      { type: 'step/end', seq: 54, time: 62, data: { turn: 1, step: 1 } },
+      { type: 'turn/end', seq: 55, time: 63, data: { turn: 1, reason: { kind: 'completed' } } },
+    ]
+
+    await ctx.sessionPersistence.create(meta)
+    await ctx.cloudRunContext.run(authority(meta.id, 1), () =>
+      ctx.sessionPersistence.append(meta.id, log))
+
+    expect((await ctx.sessionPersistence.load(meta.id)).events).toEqual(log)
+    expect((await ctx.sessionPersistence.readFrom(meta.id, 20)).events).toEqual(log.slice(20))
+
+    const pool = new Pool({ connectionString: databaseUrl as string })
+    try {
+      const rows = await pool.query<{ count: string }>(`
+        SELECT count(*)::text AS count
+        FROM dsh_cloud.session_events
+        WHERE namespace=$1 AND session_id=$2
+      `, [namespace, meta.id])
+      expect(Number(rows.rows[0]?.count)).toBeLessThan(log.length / 5)
+    } finally {
+      await pool.end()
+    }
   })
 })

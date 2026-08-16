@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
-import type { SessionEvent, SessionHeader, SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
+import {
+  decodeStorageRecord,
+  packChunkRuns,
+  type SessionEvent,
+  type SessionHeader,
+  type SessionId,
+  type SessionPreparation,
+  type StorageRecord,
+} from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_PREPARED_SESSION_CACHE_SIZE,
   DEFAULT_WRITE_BATCH_MAX_DELAY_MS,
@@ -17,9 +25,9 @@ import {
 } from '@deepseek-ai/dsh-session-persistence'
 import z from '@deepseek-ai/schemastery'
 import { Pool, type PoolClient } from 'pg'
-import type { CloudRunContext } from '@dsh-cloud/run-context'
+import type { CloudRunContext, RunAuthority } from '@dsh-cloud/run-context'
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 const SQL_SCHEMA = 'dsh_cloud'
 const DEFAULT_NAMESPACE = 'local'
 
@@ -34,12 +42,14 @@ interface SessionRow {
 
 interface EventRow {
   seq: string
-  event: SessionEvent
+  seq_end: string
+  event: StorageRecord
 }
 
 interface WriterAuthority {
   readonly fence: number
   readonly attemptId?: string
+  readonly cloud?: RunAuthority
 }
 
 /** Configuration for the PostgreSQL SessionPersistence provider. */
@@ -50,6 +60,10 @@ export interface Config {
   namespace?: string
   /** Fail closed unless an orchestrator has installed RunAttempt authority. */
   requireWriterAuthority?: boolean
+  /** Validate the Run/Attempt lease in the cloud control schema in the append transaction. */
+  validateControlAuthority?: boolean
+  /** Shared RunAttempt lease used by Worker reconciliation and execution admission. */
+  attemptLeaseSeconds?: number
   /** Maximum connections held by this Host process. */
   maxPoolSize?: number
   /** Maximum number of prepared cold Sessions retained by the upstream coordinator. */
@@ -113,30 +127,49 @@ function assertContiguous(events: readonly SessionEvent[], expected: number): vo
  * check keeps the official cold-recovery contract fail-safe under manual data
  * damage or an interrupted administrative import.
  */
-function scanRows(rows: readonly EventRow[]): { events: SessionEvent[]; tornFrom?: number } {
+function storageRows(events: readonly SessionEvent[]): Array<{ seq: number; seqEnd: number; record: StorageRecord }> {
+  return packChunkRuns(events).map(record => {
+    const expanded = decodeStorageRecord(record)
+    const first = expanded[0]
+    const last = expanded.at(-1)
+    if (first === undefined || last === undefined) throw new Error('packed session record contained no events')
+    return { seq: first.seq, seqEnd: last.seq, record }
+  })
+}
+
+function scanRows(rows: readonly EventRow[], expectedStart = 0): { events: SessionEvent[]; tornFrom?: number } {
+  const expanded: SessionEvent[] = []
+  for (const row of rows) {
+    const seq = safeInteger(row.seq, 'storage row seq')
+    const seqEnd = safeInteger(row.seq_end, 'storage row end seq')
+    const events = decodeStorageRecord(row.event)
+    if (events[0]?.seq !== seq || events.at(-1)?.seq !== seqEnd) {
+      throw new Error(`corrupt session log: packed row range ${seq}-${seqEnd} is inconsistent`)
+    }
+    expanded.push(...events)
+  }
   let lastTurnEnd = -1
-  for (let index = rows.length - 1; index >= 0; index--) {
-    if (rows[index]?.event?.type === 'turn/end') {
+  for (let index = expanded.length - 1; index >= 0; index--) {
+    if (expanded[index]?.type === 'turn/end') {
       lastTurnEnd = index
       break
     }
   }
 
   const events: SessionEvent[] = []
-  for (let index = 0; index < rows.length; index++) {
-    const row = rows[index]
-    const seq = row === undefined ? -1 : safeInteger(row.seq, 'event seq')
-    const event = row?.event
+  for (let index = 0; index < expanded.length; index++) {
+    const event = expanded[index]
+    const seq = event?.seq ?? -1
     const validEnvelope = event !== null
       && typeof event === 'object'
       && Number.isSafeInteger(event.seq)
       && event.seq === seq
       && typeof event.type === 'string'
-    if (!validEnvelope || seq !== index) {
+    if (!validEnvelope || seq !== expectedStart + index) {
       if (index <= lastTurnEnd) {
-        throw new Error(`corrupt session log: seq gap or invalid event in committed region at ${index}`)
+        throw new Error(`corrupt session log: seq gap or invalid event in committed region at ${expectedStart + index}`)
       }
-      return { events, tornFrom: index }
+      return { events, tornFrom: expectedStart + index }
     }
     events.push(structuredClone(event))
   }
@@ -151,6 +184,8 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     connectionString: z.string().required(),
     namespace: z.string().default(DEFAULT_NAMESPACE),
     requireWriterAuthority: z.boolean().default(false),
+    validateControlAuthority: z.boolean().default(false),
+    attemptLeaseSeconds: z.number().step(1).min(1).max(3600).default(20),
     maxPoolSize: z.number().step(1).min(1).max(200).default(10),
     preparedSessionCacheSize: z.number().step(1).min(1).default(DEFAULT_PREPARED_SESSION_CACHE_SIZE),
     writeBatchMaxDelayMs: z.number().step(1).min(1).max(MAX_WRITE_BATCH_DELAY_MS)
@@ -163,6 +198,8 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
   private readonly pool: Pool
   private readonly namespace: string
   private readonly requireWriterAuthority: boolean
+  private readonly validateControlAuthority: boolean
+  private readonly attemptLeaseSeconds: number
   private readonly ready: Promise<void>
   private readonly coordinator: PersistenceCoordinator<number>
   private storeId = ''
@@ -174,6 +211,8 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     }
     this.namespace = deploymentNamespace(config.namespace)
     this.requireWriterAuthority = config.requireWriterAuthority ?? false
+    this.validateControlAuthority = config.validateControlAuthority ?? false
+    this.attemptLeaseSeconds = config.attemptLeaseSeconds ?? 20
     this.pool = new Pool({
       connectionString: config.connectionString,
       max: config.maxPoolSize ?? 10,
@@ -228,7 +267,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
       const row = await this.sessionRow(client, id)
       if (row === undefined) return undefined
       const result = await client.query<EventRow>(`
-        SELECT seq::text, event
+        SELECT seq::text, seq_end::text, event
         FROM ${SQL_SCHEMA}.session_events
         WHERE namespace = $1 AND session_id = $2
         ORDER BY session_events.seq ASC
@@ -272,19 +311,17 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
       if (row === undefined) return undefined
       const nextSeq = safeInteger(row.next_seq, 'next seq')
       const result = await client.query<EventRow>(`
-        SELECT seq::text, event
+        SELECT seq::text, seq_end::text, event
         FROM ${SQL_SCHEMA}.session_events
-        WHERE namespace = $1 AND session_id = $2 AND seq >= $3
+        WHERE namespace = $1 AND session_id = $2 AND seq_end >= $3
         ORDER BY session_events.seq ASC
       `, [this.namespace, id, fromSeq])
       signal?.throwIfAborted()
-      const events = result.rows.map((eventRow, index) => {
-        const seq = safeInteger(eventRow.seq, 'event seq')
-        if (seq !== fromSeq + index || eventRow.event.seq !== seq) {
-          throw new Error(`corrupt session log: suffix gap at seq ${fromSeq + index}`)
-        }
-        return structuredClone(eventRow.event)
-      })
+      const firstStoredSeq = result.rows[0] === undefined ? fromSeq : safeInteger(result.rows[0].seq, 'storage row seq')
+      const events = scanRows(result.rows, firstStoredSeq).events.filter(event => event.seq >= fromSeq)
+      for (let index = 0; index < events.length; index++) {
+        if (events[index]?.seq !== fromSeq + index) throw new Error(`corrupt session log: suffix gap at seq ${fromSeq + index}`)
+      }
       if (fromSeq < nextSeq && events.length !== nextSeq - fromSeq) {
         throw new Error(`corrupt session log: suffix ends before stored next seq ${nextSeq}`)
       }
@@ -301,6 +338,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     await this.ready
     const authority = this.writerAuthority(meta.id)
     await this.writeTransaction(async (client) => {
+      await this.assertControlAuthority(client, authority, meta.id)
       let row: SessionRow
       if (!isMaterialized) {
         const inserted = await client.query<SessionRow>(`
@@ -339,11 +377,12 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
 
       const expected = safeInteger(row.next_seq, 'next seq')
       assertContiguous(events, expected)
+      const records = storageRows(events)
       await client.query(`
-        INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, event)
-        SELECT $1, $2, (value->>'seq')::bigint, value
+        INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, seq_end, event)
+        SELECT $1, $2, (value->>'seq')::bigint, (value->>'seqEnd')::bigint, value->'record'
         FROM jsonb_array_elements($3::jsonb) AS value
-      `, [this.namespace, meta.id, JSON.stringify(events)])
+      `, [this.namespace, meta.id, JSON.stringify(records)])
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
         SET next_seq = $3,
@@ -370,6 +409,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     await this.ready
     const authority = this.writerAuthority(meta.id)
     await this.writeTransaction(async (client) => {
+      await this.assertControlAuthority(client, authority, meta.id)
       const locked = await client.query<SessionRow>(`
         SELECT header, incarnation::text, revision::text, next_seq::text,
                writer_fence::text, writer_attempt_id
@@ -386,17 +426,23 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
       assertContiguous(closers, appendAt)
 
       if (tornMarker !== undefined) {
+        const crossing = await client.query(`
+          SELECT 1 FROM ${SQL_SCHEMA}.session_events
+          WHERE namespace=$1 AND session_id=$2 AND seq<$3 AND seq_end>=$3 LIMIT 1
+        `, [this.namespace, meta.id, tornMarker])
+        if (crossing.rowCount !== 0) throw new Error('repair marker intersects one packed storage row')
         await client.query(`
           DELETE FROM ${SQL_SCHEMA}.session_events
           WHERE namespace = $1 AND session_id = $2 AND seq >= $3
         `, [this.namespace, meta.id, tornMarker])
       }
       if (closers.length > 0) {
+        const records = storageRows(closers)
         await client.query(`
-          INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, event)
-          SELECT $1, $2, (value->>'seq')::bigint, value
+          INSERT INTO ${SQL_SCHEMA}.session_events (namespace, session_id, seq, seq_end, event)
+          SELECT $1, $2, (value->>'seq')::bigint, (value->>'seqEnd')::bigint, value->'record'
           FROM jsonb_array_elements($3::jsonb) AS value
-        `, [this.namespace, meta.id, JSON.stringify(closers)])
+        `, [this.namespace, meta.id, JSON.stringify(records)])
       }
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
@@ -463,7 +509,46 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
         `RunAttempt authority for session "${current.sessionId}" cannot write session "${sessionId}"`,
       )
     }
-    return { fence: current.writerFence, attemptId: current.attemptId }
+    return { fence: current.writerFence, attemptId: current.attemptId, cloud: current }
+  }
+
+  private async assertControlAuthority(client: PoolClient, incoming: WriterAuthority, id: SessionId): Promise<void> {
+    if (!this.validateControlAuthority || incoming.cloud === undefined) return
+    const authority = incoming.cloud
+    const result = await client.query(`
+      SELECT 1
+      WHERE EXISTS (
+        SELECT 1
+          FROM dsh_cloud_control.runs run
+          JOIN dsh_cloud_control.run_attempts attempt
+            ON attempt.namespace=run.namespace AND attempt.id=run.current_attempt_id AND attempt.run_id=run.id
+         WHERE run.namespace=$1 AND run.id::text=$2 AND run.tenant_id::text=$3
+           AND run.workspace_id::text=$4 AND run.session_id=$5
+           AND attempt.id::text=$6 AND run.writer_fence=$7 AND attempt.writer_fence=$7
+           AND run.status IN ('claimed','dispatched','running','cancel_requested')
+           AND attempt.status IN ('claimed','running')
+           AND attempt.heartbeat_at>now()-make_interval(secs=>$8)
+      ) OR EXISTS (
+        SELECT 1
+          FROM dsh_cloud_control.session_commands command
+         WHERE command.namespace=$1 AND command.command_id::text=$2
+           AND command.tenant_id::text=$3 AND command.workspace_id::text=$4
+           AND command.session_id=$5 AND command.attempt_id::text=$6
+           AND command.writer_fence=$7 AND command.expires_at>now()
+      )
+    `, [
+      this.namespace,
+      authority.runId,
+      authority.tenantId,
+      authority.workspaceId,
+      id,
+      authority.attemptId,
+      authority.writerFence,
+      this.attemptLeaseSeconds,
+    ])
+    if (result.rowCount !== 1) {
+      throw new StaleSessionWriterError(`session "${id}" rejected inactive or expired RunAttempt authority`)
+    }
   }
 
   private assertWriter(row: SessionRow, incoming: WriterAuthority, id: SessionId): void {
@@ -499,9 +584,10 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
       const schema = await client.query<{ version: number }>(`
         SELECT version FROM ${SQL_SCHEMA}.schema_state WHERE singleton = true
       `)
-      if (schema.rows[0]?.version !== SCHEMA_VERSION) {
+      const storedVersion = schema.rows[0]?.version
+      if (storedVersion !== SCHEMA_VERSION) {
         throw new Error(
-          `PostgreSQL session schema version ${String(schema.rows[0]?.version)} is incompatible with ${SCHEMA_VERSION}`,
+          `PostgreSQL session schema version ${String(storedVersion)} is incompatible with ${SCHEMA_VERSION}; reset this pre-production database`,
         )
       }
       await client.query(`
@@ -528,6 +614,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
           namespace text NOT NULL,
           session_id text NOT NULL,
           seq bigint NOT NULL CHECK (seq >= 0),
+          seq_end bigint NOT NULL CHECK (seq_end >= seq),
           event jsonb NOT NULL,
           PRIMARY KEY (namespace, session_id, seq),
           FOREIGN KEY (namespace, session_id)

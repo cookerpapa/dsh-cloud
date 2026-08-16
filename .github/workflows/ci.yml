@@ -32,8 +32,22 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - uses: azure/setup-helm@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm test
       - run: pnpm test:integration
-
+      - run: bash -n install.sh deploy/cube/register-template.sh
+      - run: helm lint deploy/helm/dsh-cloud --set sandbox.cube.templateId=ci-template
+      - name: Validate production Compose
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          DSH_CLOUD_SANDBOX_MANAGER_TOKEN: ci-manager-token-with-at-least-32-characters
+          DSH_CLOUD_SANDBOX_ENCRYPTION_KEY: Y2ktZW5jcnlwdGlvbi1rZXktMzItYnl0ZXMtbG9uZyEhISE=
+          DEEPSEEK_API_KEY: ci-model-key
+          DSH_CLOUD_CUBE_API_URL: http://cube-api.example.test:3000
+          DSH_CLOUD_CUBE_API_KEY: ci-cube-key
+          DSH_CLOUD_CUBE_TEMPLATE_ID: ci-template
+          DSH_CLOUD_CUBE_PROXY_NODE_IP: 192.0.2.10
+          DSH_CLOUD_CUBE_EGRESS_PROXY_IP: 192.0.2.11
+        run: docker compose -f deploy/production/compose.yaml config --quiet

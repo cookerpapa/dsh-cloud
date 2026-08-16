@@ -5,6 +5,8 @@
     "outDir": "lib"
   },
   "include": ["src/**/*.ts"],
-  "references": []
+  "references": [
+    { "path": "../../packages/control-store" },
+    { "path": "../../packages/run-queue" }
+  ]
 }
-

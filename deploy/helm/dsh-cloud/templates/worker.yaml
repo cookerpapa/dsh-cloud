@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ .Release.Name }}-worker, labels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker } }
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9090", prometheus.io/path: /metrics }
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: {{ include "dsh-cloud.workerImage" . }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports: [{ name: host, containerPort: 3080 }, { name: metrics, containerPort: 9090 }]
+          env:
+            - { name: DSH_CLOUD_DATABASE_URL, valueFrom: { secretKeyRef: { name: {{ .Values.postgres.secretName }}, key: {{ .Values.postgres.urlKey }} } } }
+            - { name: DSH_CLOUD_NAMESPACE, value: {{ include "dsh-cloud.namespace" . | quote }} }
+            - { name: DSH_CLOUD_HOST, value: "127.0.0.1" }
+            - { name: DSH_CLOUD_PORT, value: "3081" }
+            - { name: DSH_CLOUD_WORKER_CONTROL_HOST, value: "0.0.0.0" }
+            - { name: DSH_CLOUD_WORKER_CONTROL_PORT, value: "3080" }
+            - { name: DSH_CLOUD_WORKER_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: DSH_CLOUD_POD_IP, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+            - { name: DSH_CLOUD_WORKER_SLOTS, value: {{ .Values.worker.slots | quote }} }
+            - { name: DSH_CLOUD_WORKER_DRAIN_TIMEOUT_MS, value: {{ .Values.worker.drainTimeoutMs | quote }} }
+            - { name: DSH_CLOUD_RUN_LEASE_SECONDS, value: {{ .Values.run.leaseSeconds | quote }} }
+            - { name: DSH_CLOUD_SANDBOX_MANAGER_URL, value: http://{{ .Release.Name }}-manager:3090 }
+            - { name: DSH_CLOUD_SANDBOX_MANAGER_TOKEN, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.managerTokenKey }} } } }
+            - { name: DEEPSEEK_API_KEY, valueFrom: { secretKeyRef: { name: {{ .Values.model.secretName }}, key: {{ .Values.model.apiKeyKey }} } } }
+            - { name: DSH_HOME, value: /var/lib/dsh }
+            {{- if .Values.worker.proxy.enabled }}
+            - { name: NODE_USE_ENV_PROXY, value: "1" }
+            - { name: HTTP_PROXY, value: {{ .Values.worker.proxy.httpProxy | quote }} }
+            - { name: HTTPS_PROXY, value: {{ .Values.worker.proxy.httpsProxy | quote }} }
+            - { name: NO_PROXY, value: {{ .Values.worker.proxy.noProxy | quote }} }
+            {{- end }}
+          volumeMounts: [{ name: dsh-home, mountPath: /var/lib/dsh }, { name: workspace-stub, mountPath: /workspace }, { name: tmp, mountPath: /tmp }]
+          readinessProbe: { httpGet: { path: /, port: host }, initialDelaySeconds: 10, periodSeconds: 5 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+      volumes: [{ name: dsh-home, emptyDir: {} }, { name: workspace-stub, emptyDir: {} }, { name: tmp, emptyDir: {} }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: {{ .Release.Name }}-worker }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker } }
+{{- if .Values.worker.autoscaling.enabled }}
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata: { name: {{ .Release.Name }}-worker }
+spec:
+  scaleTargetRef: { name: {{ .Release.Name }}-worker }
+  minReplicaCount: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicaCount: {{ .Values.worker.autoscaling.maxReplicas }}
+  {{- if eq (int .Values.worker.autoscaling.minReplicas) 0 }}
+  pollingInterval: {{ .Values.worker.autoscaling.pollingIntervalSeconds }}
+  cooldownPeriod: {{ .Values.worker.autoscaling.cooldownSeconds }}
+  {{- end }}
+  triggers:
+    - type: postgresql
+      metadata:
+        connectionFromEnv: DSH_CLOUD_DATABASE_URL
+        query: "SELECT count(*) FROM dsh_cloud_control.runs WHERE namespace='{{ include "dsh-cloud.namespace" . }}' AND status='queued' AND available_at <= now()"
+        targetQueryValue: {{ .Values.worker.autoscaling.queuedRunsPerReplica | quote }}
+{{- end }}

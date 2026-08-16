@@ -1,0 +1,77 @@
+images:
+  gateway:
+    repository: ghcr.io/example/dsh-cloud-gateway
+    tag: latest
+  worker:
+    repository: ghcr.io/example/dsh-cloud-worker
+    tag: latest
+  manager:
+    repository: ghcr.io/example/dsh-cloud-manager
+    tag: latest
+  pullPolicy: IfNotPresent
+
+namespace: default
+publicOrigin: ""
+run:
+  leaseSeconds: 20
+gateway:
+  replicas: 2
+  secureCookies: true
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+worker:
+  replicas: 2
+  slots: 4
+  drainTimeoutMs: 540000
+  terminationGracePeriodSeconds: 600
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits: { cpu: "4", memory: 4Gi }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 100
+    queuedRunsPerReplica: "4"
+    pollingIntervalSeconds: 2
+    cooldownSeconds: 60
+  proxy:
+    enabled: false
+    port: 3128
+    httpProxy: ""
+    httpsProxy: ""
+    noProxy: "127.0.0.1,localhost,.svc,.cluster.local"
+manager:
+  replicas: 3
+  idleTtlMs: 1800000
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+postgres:
+  secretName: dsh-cloud-postgres
+  urlKey: database-url
+sandbox:
+  secretName: dsh-cloud-sandbox
+  managerTokenKey: manager-token
+  encryptionKeyKey: encryption-key
+  cubeApiKeyKey: cube-api-key
+  cube:
+    apiUrl: http://cube-api.cube-system.svc:3000
+    apiPort: 3000
+    templateId: ""
+    proxyNodeIp: cube-proxy.cube-system.svc
+    proxyPort: 80
+    proxyScheme: http
+    domain: cube.local
+    egressProxyIp: 10.255.255.254
+    volumeDriver: dsh-cloud-posix
+model:
+  secretName: dsh-cloud-model
+  apiKeyKey: deepseek-api-key
+
+networkPolicy:
+  enabled: true

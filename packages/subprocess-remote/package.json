@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-cloud/subprocess-remote",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-subprocess": "0.1.0-rc.6",
+    "@dsh-cloud/execution-client": "workspace:*",
+    "@dsh-cloud/execution-protocol": "workspace:*"
+  }
+}

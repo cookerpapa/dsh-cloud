@@ -1,0 +1,26 @@
+{
+  "name": "@dsh-cloud/execution-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/main.js",
+  "types": "lib/main.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/server.d.ts",
+      "default": "./lib/server.js"
+    },
+    "./engine": {
+      "types": "./lib/engine.d.ts",
+      "default": "./lib/engine.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@dsh-cloud/execution-protocol": "workspace:*",
+    "node-pty": "1.1.0"
+  },
+  "scripts": {
+    "start": "node lib/main.js"
+  }
+}

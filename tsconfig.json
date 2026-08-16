@@ -2,8 +2,18 @@
   "files": [],
   "references": [
     { "path": "./packages/run-context" },
+    { "path": "./packages/control-store" },
+    { "path": "./packages/run-admission" },
+    { "path": "./packages/run-queue" },
+    { "path": "./packages/execution-protocol" },
+    { "path": "./packages/execution-agent" },
+    { "path": "./packages/execution-client" },
+    { "path": "./packages/fs-remote" },
+    { "path": "./packages/subprocess-remote" },
+    { "path": "./packages/sandbox-remote" },
+    { "path": "./packages/sandbox-manager" },
     { "path": "./packages/session-persistence-postgres" },
     { "path": "./apps/cloud-web" }
+    ,{ "path": "./apps/gateway" }
   ]
 }
-

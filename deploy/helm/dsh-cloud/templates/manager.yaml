@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ .Release.Name }}-manager, labels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } }
+spec:
+  replicas: {{ .Values.manager.replicas }}
+  selector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "3090", prometheus.io/path: /metrics }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: manager
+          image: {{ include "dsh-cloud.managerImage" . }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          ports: [{ name: http, containerPort: 3090 }]
+          env:
+            - { name: DSH_CLOUD_DATABASE_URL, valueFrom: { secretKeyRef: { name: {{ .Values.postgres.secretName }}, key: {{ .Values.postgres.urlKey }} } } }
+            - { name: DSH_CLOUD_NAMESPACE, value: {{ include "dsh-cloud.namespace" . | quote }} }
+            - { name: DSH_CLOUD_SANDBOX_MANAGER_TOKEN, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.managerTokenKey }} } } }
+            - { name: DSH_CLOUD_SANDBOX_ENCRYPTION_KEY, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.encryptionKeyKey }} } } }
+            - { name: DSH_CLOUD_CUBE_API_KEY, valueFrom: { secretKeyRef: { name: {{ .Values.sandbox.secretName }}, key: {{ .Values.sandbox.cubeApiKeyKey }} } } }
+            - { name: DSH_CLOUD_CUBE_API_URL, value: {{ .Values.sandbox.cube.apiUrl | quote }} }
+            - { name: DSH_CLOUD_CUBE_TEMPLATE_ID, value: {{ required "sandbox.cube.templateId is required" .Values.sandbox.cube.templateId | quote }} }
+            - { name: DSH_CLOUD_CUBE_PROXY_NODE_IP, value: {{ .Values.sandbox.cube.proxyNodeIp | quote }} }
+            - { name: DSH_CLOUD_CUBE_PROXY_PORT, value: {{ .Values.sandbox.cube.proxyPort | quote }} }
+            - { name: DSH_CLOUD_CUBE_PROXY_SCHEME, value: {{ .Values.sandbox.cube.proxyScheme | quote }} }
+            - { name: DSH_CLOUD_CUBE_DOMAIN, value: {{ .Values.sandbox.cube.domain | quote }} }
+            - { name: DSH_CLOUD_CUBE_EGRESS_PROXY_IP, value: {{ .Values.sandbox.cube.egressProxyIp | quote }} }
+            - { name: DSH_CLOUD_CUBE_VOLUME_DRIVER, value: {{ .Values.sandbox.cube.volumeDriver | quote }} }
+            - { name: DSH_CLOUD_SANDBOX_IDLE_TTL_MS, value: {{ .Values.manager.idleTtlMs | quote }} }
+            - { name: DSH_CLOUD_RUN_LEASE_SECONDS, value: {{ .Values.run.leaseSeconds | quote }} }
+          readinessProbe: { httpGet: { path: /health/ready, port: http }, initialDelaySeconds: 3, periodSeconds: 5 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: {{- toYaml .Values.manager.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata: { name: {{ .Release.Name }}-manager }
+spec:
+  selector: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager }
+  ports: [{ name: http, port: 3090, targetPort: http }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: {{ .Release.Name }}-manager }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } }

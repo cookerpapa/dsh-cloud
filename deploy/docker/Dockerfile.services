@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24-bookworm-slim AS build
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH
+WORKDIR /src
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update && apt-get install -y --no-install-recommends g++ make python3 \
+ && rm -rf /var/lib/apt/lists/* && corepack enable
+COPY . .
+RUN pnpm install --frozen-lockfile && pnpm build \
+ && pnpm --filter @dsh-cloud/web deploy --prod --legacy /out/worker \
+ && pnpm --filter @dsh-cloud/gateway deploy --prod --legacy /out/gateway \
+ && pnpm --filter @dsh-cloud/sandbox-manager deploy --prod --legacy /out/manager
+
+FROM node:24-bookworm-slim AS worker
+ENV NODE_ENV=production
+WORKDIR /app
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client python3 tini \
+ && rm -rf /var/lib/apt/lists/* && mkdir -p /workspace /var/lib/dsh \
+ && chown node:node /app /workspace /var/lib/dsh
+COPY --from=build --chown=node:node /out/worker/ /app/
+USER node
+EXPOSE 3080
+EXPOSE 9090
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["node","lib/main.js"]
+
+FROM node:24-bookworm-slim AS gateway
+ENV NODE_ENV=production
+WORKDIR /app
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
+COPY --from=build --chown=node:node /out/gateway/ /app/
+USER node
+EXPOSE 8080
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["node","lib/main.js"]
+
+FROM node:24-bookworm-slim AS manager
+ENV NODE_ENV=production
+WORKDIR /app
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g; s|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list.d/debian.sources \
+ && apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
+COPY --from=build --chown=node:node /out/manager/ /app/
+USER node
+EXPOSE 3090
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["node","lib/main.js"]

@@ -1,0 +1,50 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ .Release.Name }}-default-deny }
+spec: { podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }} } }, policyTypes: [Ingress,Egress] }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ .Release.Name }}-gateway }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: gateway } }
+  policyTypes: [Ingress,Egress]
+  ingress: [{ ports: [{ protocol: TCP, port: 8080 }] }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker } } }]
+      ports: [{ protocol: TCP, port: 3080 }]
+    - ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }, { protocol: TCP, port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ .Release.Name }}-worker }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: worker } }
+  policyTypes: [Ingress,Egress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: gateway } } }]
+      ports: [{ protocol: TCP, port: 3080 }]
+    - ports: [{ protocol: TCP, port: 9090 }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } } }]
+      ports: [{ protocol: TCP, port: 3090 }]
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 5432 }
+        {{- if .Values.worker.proxy.enabled }}
+        - { protocol: TCP, port: {{ .Values.worker.proxy.port }} }
+        {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ .Release.Name }}-manager }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: manager } }
+  policyTypes: [Ingress,Egress]
+  ingress:
+    - ports: [{ protocol: TCP, port: 3090 }]
+  egress: [{ ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }, { protocol: TCP, port: {{ .Values.sandbox.cube.apiPort }} }, { protocol: TCP, port: {{ .Values.sandbox.cube.proxyPort }} }, { protocol: TCP, port: 443 }, { protocol: TCP, port: 5432 }] }]
+{{- end }}

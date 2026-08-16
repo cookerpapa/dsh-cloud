@@ -78,6 +78,8 @@ integration('Cloud Web profile', () => {
         DSH_HOME: home,
         DSH_CLOUD_DATABASE_URL: databaseUrl as string,
         DSH_CLOUD_NAMESPACE: `web-smoke-${port}`,
+        DSH_CLOUD_SANDBOX_MANAGER_URL: 'http://127.0.0.1:9',
+        DSH_CLOUD_SANDBOX_MANAGER_TOKEN: 'web-smoke-manager-token-32-characters',
         DSH_CLOUD_HOST: '127.0.0.1',
         DSH_CLOUD_PORT: String(port),
       },
@@ -97,4 +99,3 @@ integration('Cloud Web profile', () => {
     children.delete(child)
   }, 40_000)
 })
-

@@ -6,7 +6,12 @@
   "main": "lib/main.js",
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.0-rc.6",
-    "@dsh-cloud/web-bundle": "workspace:*"
+    "@dsh-cloud/control-store": "workspace:*",
+    "@dsh-cloud/run-queue": "workspace:*",
+    "@dsh-cloud/web-bundle": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.5"
   }
 }
-

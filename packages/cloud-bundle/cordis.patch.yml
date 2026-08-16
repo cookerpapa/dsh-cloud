@@ -5,9 +5,43 @@
 - id: session-persistence-jsonl
   disabled: true
 
+# The production Cloud profile never registers host-local filesystem or
+# subprocess implementations. DSH tools keep their upstream contracts while
+# these three providers move their effects into the Cube execution plane.
+- id: subprocess
+  disabled: true
+
+- id: fs-sandbox
+  disabled: true
+
+- id: sandbox
+  disabled: true
+
 - insert:
     - id: cloud-run-context
       name: '@dsh-cloud/run-context'
+
+    - id: cloud-run-admission
+      name: '@dsh-cloud/run-admission'
+      config:
+        connectionString: !!js process.env.DSH_CLOUD_DATABASE_URL
+        namespace: !!js process.env.DSH_CLOUD_NAMESPACE ?? 'default'
+
+    - id: cloud-execution-client
+      name: '@dsh-cloud/execution-client'
+      config:
+        managerUrl: !!js process.env.DSH_CLOUD_SANDBOX_MANAGER_URL
+        internalToken: !!js process.env.DSH_CLOUD_SANDBOX_MANAGER_TOKEN
+        requestTimeoutMs: 300000
+
+    - id: cloud-subprocess
+      name: '@dsh-cloud/subprocess-remote'
+
+    - id: cloud-filesystem
+      name: '@dsh-cloud/fs-remote'
+
+    - id: cloud-sandbox
+      name: '@dsh-cloud/sandbox-remote'
 
     - id: session-persistence-postgres
       name: '@dsh-cloud/session-persistence-postgres'
@@ -15,6 +49,7 @@
         connectionString: !!js process.env.DSH_CLOUD_DATABASE_URL
         namespace: !!js process.env.DSH_CLOUD_NAMESPACE ?? 'local'
         requireWriterAuthority: false
+        validateControlAuthority: true
+        attemptLeaseSeconds: !!js Number(process.env.DSH_CLOUD_RUN_LEASE_SECONDS ?? '20')
         maxPoolSize: 10
         writeBatchMaxDelayMs: 40
-

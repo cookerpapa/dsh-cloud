@@ -8,19 +8,61 @@ importers:
 
   .:
     dependencies:
+      '@dsh-cloud/control-store':
+        specifier: workspace:*
+        version: link:packages/control-store
+      '@dsh-cloud/execution-agent':
+        specifier: workspace:*
+        version: link:packages/execution-agent
+      '@dsh-cloud/execution-client':
+        specifier: workspace:*
+        version: link:packages/execution-client
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:packages/execution-protocol
+      '@dsh-cloud/fs-remote':
+        specifier: workspace:*
+        version: link:packages/fs-remote
+      '@dsh-cloud/run-admission':
+        specifier: workspace:*
+        version: link:packages/run-admission
       '@dsh-cloud/run-context':
         specifier: workspace:*
         version: link:packages/run-context
+      '@dsh-cloud/run-queue':
+        specifier: workspace:*
+        version: link:packages/run-queue
+      '@dsh-cloud/sandbox-manager':
+        specifier: workspace:*
+        version: link:packages/sandbox-manager
+      '@dsh-cloud/sandbox-remote':
+        specifier: workspace:*
+        version: link:packages/sandbox-remote
       '@dsh-cloud/session-persistence-postgres':
         specifier: workspace:*
         version: link:packages/session-persistence-postgres
+      '@dsh-cloud/subprocess-remote':
+        specifier: workspace:*
+        version: link:packages/subprocess-remote
       '@dsh-cloud/web-bundle':
         specifier: workspace:*
         version: link:packages/cloud-bundle
     devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-llm':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
       tsx:
         specifier: ^4.20.0
         version: 4.23.12
@@ -36,24 +78,219 @@ importers:
       '@deepseek-ai/dsh':
         specifier: 0.1.0-rc.6
         version: 0.1.0-rc.6(cdc8f2a8de2f253bf4b970ad7eada1b6)
+      '@dsh-cloud/control-store':
+        specifier: workspace:*
+        version: link:../../packages/control-store
+      '@dsh-cloud/run-queue':
+        specifier: workspace:*
+        version: link:../../packages/run-queue
       '@dsh-cloud/web-bundle':
         specifier: workspace:*
         version: link:../../packages/cloud-bundle
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+
+  apps/gateway:
+    dependencies:
+      '@dsh-cloud/control-store':
+        specifier: workspace:*
+        version: link:../../packages/control-store
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+      ws:
+        specifier: ^8.18.3
+        version: 8.21.3
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
 
   packages/cloud-bundle:
+    dependencies:
+      '@dsh-cloud/execution-client':
+        specifier: workspace:*
+        version: link:../execution-client
+      '@dsh-cloud/fs-remote':
+        specifier: workspace:*
+        version: link:../fs-remote
+      '@dsh-cloud/run-admission':
+        specifier: workspace:*
+        version: link:../run-admission
+      '@dsh-cloud/run-context':
+        specifier: workspace:*
+        version: link:../run-context
+      '@dsh-cloud/sandbox-remote':
+        specifier: workspace:*
+        version: link:../sandbox-remote
+      '@dsh-cloud/session-persistence-postgres':
+        specifier: workspace:*
+        version: link:../session-persistence-postgres
+      '@dsh-cloud/subprocess-remote':
+        specifier: workspace:*
+        version: link:../subprocess-remote
+
+  packages/control-store:
+    dependencies:
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+
+  packages/execution-agent:
+    dependencies:
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:../execution-protocol
+      node-pty:
+        specifier: 1.1.0
+        version: 1.1.0
+
+  packages/execution-client:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:../execution-protocol
+      '@dsh-cloud/run-context':
+        specifier: workspace:*
+        version: link:../run-context
+
+  packages/execution-protocol:
     dependencies:
       '@dsh-cloud/run-context':
         specifier: workspace:*
         version: link:../run-context
-      '@dsh-cloud/session-persistence-postgres':
+
+  packages/fs-remote:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-fs':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(6889042eed4b1d3d73c9a7bc6cc8e4e3)
+      '@deepseek-ai/dsh-sandbox':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-llm@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))))(@deepseek-ai/dsh-session@0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6))
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
+      '@dsh-cloud/execution-client':
         specifier: workspace:*
-        version: link:../session-persistence-postgres
+        version: link:../execution-client
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:../execution-protocol
+
+  packages/run-admission:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(54ebcfd5493661f914debcfc017ddfe5)
+      '@deepseek-ai/dsh-session':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6)
+      '@deepseek-ai/schemastery':
+        specifier: ^3.17.1
+        version: 3.18.1
+      '@dsh-cloud/control-store':
+        specifier: workspace:*
+        version: link:../control-store
+      '@dsh-cloud/run-context':
+        specifier: workspace:*
+        version: link:../run-context
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
 
   packages/run-context:
     dependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
         version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+
+  packages/run-queue:
+    dependencies:
+      '@dsh-cloud/control-store':
+        specifier: workspace:*
+        version: link:../control-store
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+
+  packages/sandbox-manager:
+    dependencies:
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:../execution-protocol
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+      undici:
+        specifier: ^7.22.0
+        version: 7.29.0
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@dsh-cloud/execution-agent':
+        specifier: workspace:*
+        version: link:../execution-agent
+      '@dsh-cloud/execution-client':
+        specifier: workspace:*
+        version: link:../execution-client
+      '@dsh-cloud/fs-remote':
+        specifier: workspace:*
+        version: link:../fs-remote
+      '@dsh-cloud/run-context':
+        specifier: workspace:*
+        version: link:../run-context
+      '@dsh-cloud/subprocess-remote':
+        specifier: workspace:*
+        version: link:../subprocess-remote
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.21.0
+
+  packages/sandbox-remote:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-sandbox':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-llm@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))))(@deepseek-ai/dsh-session@0.1.0-rc.6(6fd26f59436a18b115f326d6060415e6))
 
   packages/session-persistence-postgres:
     dependencies:
@@ -82,6 +319,21 @@ importers:
       '@types/pg':
         specifier: ^8.15.5
         version: 8.21.0
+
+  packages/subprocess-remote:
+    dependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-subprocess':
+        specifier: 0.1.0-rc.6
+        version: 0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))
+      '@dsh-cloud/execution-client':
+        specifier: workspace:*
+        version: link:../execution-client
+      '@dsh-cloud/execution-protocol':
+        specifier: workspace:*
+        version: link:../execution-protocol
 
 packages:
 
@@ -2944,6 +3196,9 @@ packages:
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
 
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
+
   '@ungap/structured-clone@1.3.3':
     resolution: {integrity: sha512-60YRaenCQcVjYEKOcG824+DRGGIQ3VKErcBoAEDJZz5bKIs2ZG+X/H9Nk+Q6EVkwJk5QNApxbrc5QtBSwtrXAg==}
 
@@ -4085,6 +4340,10 @@ packages:
 
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+
+  undici@7.29.0:
+    resolution: {integrity: sha512-IDxfleLmmbSskfWSUATiN1nfn2rDuvnMOqb5CWR92iIfojA0Ud+ulOAAEQ57LPr9rWmsreUyf5lwyao+7GNNVw==}
+    engines: {node: '>=20.18.1'}
 
   unist-util-is@6.0.1:
     resolution: {integrity: sha512-LsiILbtBETkDz8I9p1dQ0uyRUWuaQzd/cuEeS1hoRSyW5E5XGmTzlwY1OrNzzakGowI9Dr/I8HVaw4hTtnxy8g==}
@@ -7617,6 +7876,10 @@ snapshots:
 
   '@types/unist@3.0.3': {}
 
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 22.20.1
+
   '@ungap/structured-clone@1.3.3': {}
 
   '@vitest/expect@4.1.10':
@@ -8999,6 +9262,8 @@ snapshots:
   typescript@6.0.3: {}
 
   undici-types@6.21.0: {}
+
+  undici@7.29.0: {}
 
   unist-util-is@6.0.1:
     dependencies:

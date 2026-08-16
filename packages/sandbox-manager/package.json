@@ -1,0 +1,36 @@
+{
+  "name": "@dsh-cloud/sandbox-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/main.js",
+  "types": "lib/main.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cube": {
+      "types": "./lib/cube-provider.d.ts",
+      "default": "./lib/cube-provider.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@dsh-cloud/execution-protocol": "workspace:*",
+    "pg": "^8.16.3",
+    "undici": "^7.22.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-cloud/execution-agent": "workspace:*",
+    "@dsh-cloud/execution-client": "workspace:*",
+    "@dsh-cloud/fs-remote": "workspace:*",
+    "@dsh-cloud/run-context": "workspace:*",
+    "@dsh-cloud/subprocess-remote": "workspace:*",
+    "@types/pg": "^8.15.5"
+  },
+  "scripts": {
+    "start": "node lib/main.js"
+  }
+}
