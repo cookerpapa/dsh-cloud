@@ -13,6 +13,7 @@
     "@deepseek-ai/dsh-session-persistence": "0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.17.1",
     "@dsh-cloud/control-store": "workspace:*",
+    "@dsh-cloud/agent-residency": "workspace:*",
     "@dsh-cloud/run-context": "workspace:*",
     "pg": "^8.16.3"
   },

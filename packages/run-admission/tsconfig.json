@@ -2,5 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "rootDir": "src", "outDir": "lib" },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../control-store" }, { "path": "../run-context" }]
+  "references": [
+    { "path": "../agent-residency" },
+    { "path": "../control-store" },
+    { "path": "../run-context" }
+  ]
 }

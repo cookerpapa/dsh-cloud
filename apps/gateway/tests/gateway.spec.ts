@@ -60,7 +60,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
     fakeB.on('upgrade',(request,socket,head)=>fakeSocketsB.handleUpgrade(request,socket,head,()=>undefined))
     const workerPort=await listen(fake)
     const workerPortB=await listen(fakeB)
-    gateway=new CloudGateway({pool,namespace,secureCookies:false,toolBroker:{url:`http://127.0.0.1:${workerPort}`,token:'test-tool-broker-token'}})
+    gateway=new CloudGateway({pool,namespace,secureCookies:false,promptAdmissionTimeoutMs:100,toolBroker:{url:`http://127.0.0.1:${workerPort}`,token:'test-tool-broker-token'}})
     await gateway.initialize()
     await gateway.store.heartbeatWorker({id:'worker-test',baseUrl:`http://127.0.0.1:${workerPort}`,maximumRuns:4})
     await gateway.store.heartbeatWorker({id:'worker-test-b',baseUrl:`http://127.0.0.1:${workerPortB}`,maximumRuns:4})
@@ -132,6 +132,23 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const rpcId=randomUUID();const response=await fetch(`${baseUrl}/api/session.prompt`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId,method:'session.prompt',payload:{sessionId:ownedSession,mode:'queue',content:[{type:'text',text:'hello'}]}})})
     const value=await response.json() as {result:{value:{accepted:boolean;runId:string}}};expect(value.result.value.accepted).toBe(true);promptRunId=value.result.value.runId
     expect((await gateway.store.runResponse(value.result.value.runId))?.status).toBe('queued')
+  })
+
+  test('returns a prompt RPC error when the durable Run fails before user/message',async()=>{
+    const sessionId=randomUUID()
+    const created=await fetch(`${baseUrl}/api/session.create`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.create',payload:{sessionId}})})
+    expect(await created.json()).toMatchObject({result:{ok:true,value:{sessionId}}})
+    const rpcId=randomUUID()
+    const pending=fetch(`${baseUrl}/api/session.prompt`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId,method:'session.prompt',payload:{sessionId,mode:'queue',content:[{type:'text',text:'retain this draft'}]}})})
+    let failed=0
+    for(let attempt=0;attempt<40&&failed!==1;attempt+=1){
+      const result=await pool.query(`UPDATE dsh_cloud_control.runs SET status='failed',error_code='prompt_persistence_timeout',updated_at=now() WHERE namespace=$1 AND client_rpc_id=$2 AND status='queued'`,[namespace,rpcId])
+      failed=result.rowCount??0
+      if(failed===0)await new Promise(resolve=>setTimeout(resolve,5))
+    }
+    expect(failed).toBe(1)
+    const response=await pending
+    expect(await response.json()).toMatchObject({result:{ok:false,error:{code:'internal',message:'The prompt could not be delivered. Your draft was kept; retry the message.'}}})
   })
 
   test('routes native interactive responses to the exact active Run Worker',async()=>{

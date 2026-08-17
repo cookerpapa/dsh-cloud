@@ -578,10 +578,10 @@ export class ControlStore {
     } catch (error) { await client.query('ROLLBACK').catch(() => undefined); throw error } finally { client.release() }
   }
 
-  async runResponse(runId: string): Promise<{ status: string; clientRpcId: string; response?: unknown; workerId?: string } | undefined> {
-    const result = await this.pool.query<{ status: string; client_rpc_id: string; response_json: unknown | null; worker_id: string | null }>(`SELECT status,client_rpc_id,response_json,worker_id FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND id=$2`, [this.namespace, runId])
+  async runResponse(runId: string): Promise<{ status: string; clientRpcId: string; response?: unknown; workerId?: string; errorCode?: string } | undefined> {
+    const result = await this.pool.query<{ status: string; client_rpc_id: string; response_json: unknown | null; worker_id: string | null; error_code: string | null }>(`SELECT status,client_rpc_id,response_json,worker_id,error_code FROM ${SQL_SCHEMA}.runs WHERE namespace=$1 AND id=$2`, [this.namespace, runId])
     const row = result.rows[0]
-    return row === undefined ? undefined : { status: row.status, clientRpcId: row.client_rpc_id, ...(row.response_json === null ? {} : { response: row.response_json }), ...(row.worker_id === null ? {} : { workerId: row.worker_id }) }
+    return row === undefined ? undefined : { status: row.status, clientRpcId: row.client_rpc_id, ...(row.response_json === null ? {} : { response: row.response_json }), ...(row.worker_id === null ? {} : { workerId: row.worker_id }), ...(row.error_code === null ? {} : { errorCode: row.error_code }) }
   }
 
   async turnOutcome(runId: string): Promise<RunTurnOutcome | undefined> {

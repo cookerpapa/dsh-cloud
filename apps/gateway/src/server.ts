@@ -32,6 +32,7 @@ interface GatewayOptions {
   publicOrigin?: string
   secureCookies: boolean
   eventProjectionTimeoutMs?: number
+  promptAdmissionTimeoutMs?: number
   allowedAgentPresets?: readonly string[]
   toolBroker?: { url: string; token: string }
 }
@@ -110,6 +111,7 @@ export class CloudGateway {
 
   constructor(private readonly options: GatewayOptions) {
     if(options.eventProjectionTimeoutMs!==undefined&&(!Number.isSafeInteger(options.eventProjectionTimeoutMs)||options.eventProjectionTimeoutMs<1_000||options.eventProjectionTimeoutMs>300_000))throw new TypeError('eventProjectionTimeoutMs is invalid')
+    if(options.promptAdmissionTimeoutMs!==undefined&&(!Number.isSafeInteger(options.promptAdmissionTimeoutMs)||options.promptAdmissionTimeoutMs<100||options.promptAdmissionTimeoutMs>300_000))throw new TypeError('promptAdmissionTimeoutMs is invalid')
     const configuredPresets=options.allowedAgentPresets??['standard','code']
     if(configuredPresets.some(id=>!/^[a-z0-9][a-z0-9-]*$/.test(id)))throw new TypeError('allowed Agent preset id is invalid')
     this.allowedAgentPresets=new Set(['standard',...configuredPresets])
@@ -210,6 +212,11 @@ export class CloudGateway {
     }
     if(envelope.method==='session.prompt'){
       const enqueued=await this.store.enqueueRun({tenantId:principal.tenantId,sessionId:sid!,clientRpcId:envelope.rpcId,idempotencyKey:String(request.headers['idempotency-key']??envelope.rpcId),request:envelope})
+      const admission=await this.waitForPromptAdmission(enqueued.runId,sid!)
+      if(admission==='failed'){
+        rpcError(response,envelope,'internal','The prompt could not be delivered. Your draft was kept; retry the message.')
+        return
+      }
       rpc(response,envelope,{accepted:true,runId:enqueued.runId});return
     }
     if(envelope.method==='session.cancel'){await this.store.requestSessionCancellation(principal.tenantId,sid!);rpc(response,envelope,{accepted:true});return}
@@ -402,6 +409,17 @@ export class CloudGateway {
     const deadline=Date.now()+(this.options.eventProjectionTimeoutMs??90_000)
     while(Date.now()<deadline){const through=await this.store.sessionDurableThrough(sessionId);watermarks.set(sessionId,through);if(through>=seq)return;await this.waitProjectionSignal(sessionId,Math.min(100,deadline-Date.now()))}
     throw new Error('Session event did not cross the durable live-projection barrier')
+  }
+  private async waitForPromptAdmission(runId:string,sessionId:string):Promise<'persisted'|'pending'|'failed'>{
+    const deadline=Date.now()+(this.options.promptAdmissionTimeoutMs??35_000)
+    while(true){
+      if(await this.store.promptPersisted(runId))return 'persisted'
+      const run=await this.store.runResponse(runId)
+      if(run===undefined||['failed','cancelled','timed_out'].includes(run.status))return 'failed'
+      const remaining=deadline-Date.now()
+      if(remaining<=0)return 'pending'
+      await this.waitProjectionSignal(sessionId,Math.min(250,remaining))
+    }
   }
   private waitProjectionSignal(sessionId:string,timeoutMs:number):Promise<void>{
     if(timeoutMs<=0)return Promise.resolve()

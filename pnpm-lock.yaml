@@ -258,6 +258,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.17.1
         version: 3.18.1
+      '@dsh-cloud/agent-residency':
+        specifier: workspace:*
+        version: link:../agent-residency
       '@dsh-cloud/control-store':
         specifier: workspace:*
         version: link:../control-store

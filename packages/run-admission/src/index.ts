@@ -7,6 +7,7 @@ import { Pool } from 'pg'
 import { ControlStore } from '@dsh-cloud/control-store'
 import { cloudIdentifier, writerFence } from '@dsh-cloud/run-context'
 import type { RunAuthority } from '@dsh-cloud/run-context'
+import type { CloudAgentResidency } from '@dsh-cloud/agent-residency'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { apiProxy: ApiProxy }
@@ -20,7 +21,7 @@ interface AuthorityAwareSessionPersistence extends SessionPersistence {
 }
 
 class RunAdmission {
-  static inject = ['apiProxy', 'cloudRunContext', 'sessionPersistence']
+  static inject = ['apiProxy', 'cloudRunContext', 'sessionPersistence', 'cloudAgentResidency']
   static Config: z<Config> = z.object({ connectionString: z.string().required(), namespace: z.string().default('default') })
   private readonly pool: Pool
 
@@ -50,7 +51,10 @@ class RunAdmission {
       ;(ctx.sessionPersistence as AuthorityAwareSessionPersistence).bindRunAuthority?.(runAuthority)
       return ctx.cloudRunContext.run(runAuthority, operation)
     }
-    ctx.apiProxy.sessions.prompt = request => run(request, () => prompt(request))
+    ctx.apiProxy.sessions.prompt = request => run(request, async () => {
+      await (ctx.cloudAgentResidency as CloudAgentResidency).prepareForRun(request.payload.sessionId)
+      return prompt(request)
+    })
     ctx.apiProxy.sessions.rename = request => run(request, () => rename(request))
     ctx.apiProxy.sessions.selectModel = request => run(request, () => selectModel(request))
     ctx.apiProxy.sessions.updateQueue = request => run(request, () => updateQueue(request))

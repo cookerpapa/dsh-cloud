@@ -1,5 +1,6 @@
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 
 export interface Config {
@@ -14,6 +15,11 @@ interface TrackedAgent {
   sawRunning: boolean
   timer?: ReturnType<typeof setTimeout>
   disposing: boolean
+  disposePromise?: Promise<void>
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context { cloudAgentResidency: CloudAgentResidency }
 }
 
 /**
@@ -21,7 +27,7 @@ interface TrackedAgent {
  * the only cross-Run continuity mechanism. This deliberately uses DSH's public
  * AgentHandle lifecycle instead of modifying the upstream Agent Loop.
  */
-class CloudAgentResidency {
+export class CloudAgentResidency extends Service {
   static inject = ['agents', 'sessions']
   static Config: z<Config> = z.object({
     initialIdleGraceMs: z.number().min(100).default(2_000),
@@ -33,6 +39,7 @@ class CloudAgentResidency {
   private readonly settledIdleGraceMs: number
 
   constructor(ctx: Context, config: Config) {
+    super(ctx, 'cloudAgentResidency')
     this.initialIdleGraceMs = config.initialIdleGraceMs ?? 2_000
     this.settledIdleGraceMs = config.settledIdleGraceMs ?? 25
 
@@ -73,6 +80,30 @@ class CloudAgentResidency {
     }, 'cloudAgentResidency.lifecycle')
   }
 
+  /**
+   * Remove process-local state before a durable Run starts. The next upstream
+   * session.prompt must therefore cold-resume from the shared Session log and
+   * cannot append through an idle Agent carrying an older writer fence.
+   */
+  async prepareForRun(sessionId: SessionId): Promise<void> {
+    let entry = this.tracked.get(sessionId)
+    if (entry?.disposePromise !== undefined) await entry.disposePromise
+    entry = this.tracked.get(sessionId)
+    if (entry === undefined) {
+      if (this.ctx.agents.get(sessionId) !== undefined) {
+        throw new Error(`session "${sessionId}" has an untracked process-local Agent`)
+      }
+      return
+    }
+    this.clearTimer(entry)
+    if (entry.handle.agent.status !== 'idle') await entry.handle.agent.whenIdle()
+    if (this.tracked.get(sessionId) !== entry) return
+    await this.disposeWithoutFlush(entry)
+    if (this.ctx.agents.get(sessionId) !== undefined) {
+      throw new Error(`session "${sessionId}" remained process-local after disposal`)
+    }
+  }
+
   private capture(ctx: Context, handle: AgentHandle): AgentHandle {
     // Continuable subagents have a separate owner that deliberately retains its
     // AgentHandle. Cloud residency governs only ordinary user Sessions.
@@ -101,18 +132,37 @@ class CloudAgentResidency {
   private async release(ctx: Context, entry: TrackedAgent): Promise<void> {
     const agent: Agent = entry.handle.agent
     const id = String(agent.id)
-    if (entry.disposing || this.tracked.get(id) !== entry || agent.status !== 'idle') return
+    if (entry.disposePromise !== undefined) return entry.disposePromise
+    if (this.tracked.get(id) !== entry || agent.status !== 'idle') return
     entry.disposing = true
-    try {
+    const operation = (async () => {
       const participated = await ctx.sessions.flush(agent.session)
       if (!participated) throw new Error(`session "${id}" has no durability participant`)
       if (this.tracked.get(id) !== entry || agent.status !== 'idle') return
       await entry.handle.dispose()
+    })()
+    entry.disposePromise = operation
+    try {
+      await operation
     } catch (error: unknown) {
       ctx.logger.warn(`cloud Agent residency could not release session "${id}": ${String(error)}`)
       if (this.tracked.get(id) === entry && agent.status === 'idle') this.schedule(ctx, entry, this.initialIdleGraceMs)
     } finally {
       entry.disposing = false
+      delete entry.disposePromise
+    }
+  }
+
+  private async disposeWithoutFlush(entry: TrackedAgent): Promise<void> {
+    if (entry.disposePromise !== undefined) return entry.disposePromise
+    entry.disposing = true
+    const operation = entry.handle.dispose()
+    entry.disposePromise = operation
+    try {
+      await operation
+    } finally {
+      entry.disposing = false
+      delete entry.disposePromise
     }
   }
 }
