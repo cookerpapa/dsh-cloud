@@ -25,6 +25,7 @@ const READ_ONLY_HOST_METHODS = new Set([
 ])
 
 interface Envelope { type: string; rpcId: string; method: string; payload: Record<string, unknown> }
+interface ClientResponseEnvelope { type: 'client-response'; rpcId: string; result: { ok: boolean; value?: Record<string, unknown> } }
 interface GatewayOptions {
   pool: Pool
   namespace: string
@@ -61,6 +62,14 @@ function parseEnvelope(body: Buffer): Envelope {
   const value=JSON.parse(body.toString('utf8')) as Partial<Envelope>
   if(value.type!=='client-request'||typeof value.rpcId!=='string'||typeof value.method!=='string'||value.payload===null||typeof value.payload!=='object') throw Object.assign(new Error('invalid RPC envelope'),{status:400})
   return value as Envelope
+}
+
+function parseClientResponse(body: Buffer): ClientResponseEnvelope {
+  const value=JSON.parse(body.toString('utf8')) as Partial<ClientResponseEnvelope>
+  const result=value.result
+  if(value.type!=='client-response'||typeof value.rpcId!=='string'||value.rpcId.length===0||result===null||typeof result!=='object'||typeof result.ok!=='boolean')throw Object.assign(new Error('invalid client response envelope'),{status:400})
+  if(result.ok!==true||result.value===null||typeof result.value!=='object'||typeof result.value['sessionId']!=='string')throw Object.assign(new Error('client response has no Session authority'),{status:400})
+  return value as ClientResponseEnvelope
 }
 
 function sessionId(envelope: Envelope): string | undefined { return typeof envelope.payload['sessionId']==='string' ? envelope.payload['sessionId'] : undefined }
@@ -187,6 +196,7 @@ export class CloudGateway {
 
   private async api(request:IncomingMessage,response:ServerResponse,principal:Principal,path:string,body:Buffer):Promise<void>{
     if(request.method!=='POST'){json(response,405,{error:'method not allowed'});return}
+    if(path==='/api/respond'){await this.respond(request,response,principal,body);return}
     const envelope=parseEnvelope(body)
     if(!this.sameOrigin(request)){rpcError(response,envelope,'bad-request','Request origin was rejected',403);return}
     if(path!==`/api/${envelope.method}`){rpcError(response,envelope,'bad-request','RPC method does not match its HTTP route',400);return}
@@ -267,6 +277,17 @@ export class CloudGateway {
       rpcError(response,envelope,code,'This cloud deployment does not expose that Host operation');return
     }
     await copyResponse(await this.fetchWorker(worker,path,request,body),response)
+  }
+
+  private async respond(request:IncomingMessage,response:ServerResponse,principal:Principal,body:Buffer):Promise<void>{
+    if(!this.sameOrigin(request)){json(response,403,{accepted:false,reason:'bad-response'});return}
+    let envelope:ClientResponseEnvelope
+    try{envelope=parseClientResponse(body)}catch{json(response,200,{accepted:false,reason:'bad-response'});return}
+    const sid=envelope.result.value!['sessionId'] as string
+    if(!await this.store.ownsSession(principal.tenantId,sid)){json(response,200,{accepted:false,reason:'not-pending'});return}
+    const worker=await this.store.activeRunWorker(principal.tenantId,sid)
+    if(worker===undefined){json(response,200,{accepted:false,reason:'not-pending'});return}
+    await copyResponse(await this.fetchWorker(worker,'/api/respond',request,body),response)
   }
 
   private cloudDirectory(response:ServerResponse,envelope:Envelope):void{

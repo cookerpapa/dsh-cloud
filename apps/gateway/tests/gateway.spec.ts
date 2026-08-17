@@ -17,12 +17,18 @@ enabled('multi-tenant Cloud Gateway',()=>{
   let fake:Server,fakeSockets:WebSocketServer,fakeB:Server,fakeSocketsB:WebSocketServer,gateway:CloudGateway,baseUrl='',cookie='',ownedSession=''
   const workerOrigins=new Map<string,string|undefined>()
   const workerRequests=new Map<string,{method:string;payload:Record<string,unknown>}>()
+  const workerResponses=new Map<string,Record<string,unknown>>()
+  let promptRunId=''
 
   beforeAll(async()=>{
     fake=createServer(async(request,response)=>{
       if(request.url==='/'&&request.method==='GET'){response.writeHead(200,{'content-type':'text/html'});response.end('<main>official dsh ui</main>');return}
       if(request.url==='/v1/workspaces/destroy'&&request.method==='POST'){response.writeHead(200,{'content-type':'application/json'});response.end('{"deleted":true}');return}
       const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));const envelope=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {rpcId:string;method:string;payload:Record<string,unknown>}
+      if(request.url==='/api/respond'){
+        workerResponses.set(envelope.rpcId,envelope as unknown as Record<string,unknown>)
+        const body=JSON.stringify({accepted:true});response.writeHead(200,{'content-type':'application/json','content-length':String(Buffer.byteLength(body))});response.end(body);return
+      }
       workerOrigins.set(envelope.rpcId,request.headers.origin)
       workerRequests.set(envelope.rpcId,{method:envelope.method,payload:envelope.payload})
       let value:unknown={}
@@ -124,8 +130,27 @@ enabled('multi-tenant Cloud Gateway',()=>{
 
   test('admits prompts to PostgreSQL instead of invoking the Host directly',async()=>{
     const rpcId=randomUUID();const response=await fetch(`${baseUrl}/api/session.prompt`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId,method:'session.prompt',payload:{sessionId:ownedSession,mode:'queue',content:[{type:'text',text:'hello'}]}})})
-    const value=await response.json() as {result:{value:{accepted:boolean;runId:string}}};expect(value.result.value.accepted).toBe(true)
+    const value=await response.json() as {result:{value:{accepted:boolean;runId:string}}};expect(value.result.value.accepted).toBe(true);promptRunId=value.result.value.runId
     expect((await gateway.store.runResponse(value.result.value.runId))?.status).toBe('queued')
+  })
+
+  test('routes native interactive responses to the exact active Run Worker',async()=>{
+    const workerPort=(fake.address() as {port:number}).port
+    await gateway.store.heartbeatWorker({id:'worker-test',baseUrl:`http://127.0.0.1:${workerPort}`,maximumRuns:4})
+    const claimed=await pool.query(`UPDATE dsh_cloud_control.runs SET status='claimed',worker_id='worker-test',updated_at=now() WHERE namespace=$1 AND id=$2 AND session_id=$3 AND status='queued'`,[namespace,promptRunId,ownedSession])
+    expect(claimed.rowCount).toBe(1)
+    const rpcId=randomUUID()
+    const message={type:'client-response',rpcId,result:{ok:true,value:{sessionId:ownedSession,answer:{answers:[{id:'implementation',selected:['hoare']}]}}}}
+    const response=await fetch(`${baseUrl}/api/respond`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(message)})
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({accepted:true})
+    expect(workerResponses.get(rpcId)).toEqual(message)
+
+    const second=await fetch(`${baseUrl}/cloud/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Response intruder',email:'response-intruder@example.test',password:'another secure password'})})
+    const otherCookie=second.headers.get('set-cookie')!.split(';')[0]!
+    const denied=await fetch(`${baseUrl}/api/respond`,{method:'POST',headers:{cookie:otherCookie,'content-type':'application/json'},body:JSON.stringify({...message,rpcId:randomUUID()})})
+    expect(await denied.json()).toEqual({accepted:false,reason:'not-pending'})
+    expect(workerResponses.size).toBe(1)
   })
 
   test('rejects cross-tenant history access',async()=>{
