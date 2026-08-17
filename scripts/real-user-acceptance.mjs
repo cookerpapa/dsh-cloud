@@ -38,6 +38,8 @@ try {
     runId: result.runId,
     durationMs: result.durationMs,
     firstAssistantMs: result.firstAssistantMs,
+    assistantChunkFlow: result.assistantChunkFlow,
+    textDeltaFlow: result.textDeltaFlow,
     observedEvents: result.events.length,
     firstObservedSeq: result.events[0]?.seq,
     terminalSeq: result.terminal.seq,

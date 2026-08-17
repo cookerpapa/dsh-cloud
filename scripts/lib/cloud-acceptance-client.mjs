@@ -7,6 +7,24 @@ export function percentile(values, fraction) {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))]
 }
 
+function eventFlow(arrivals) {
+  if (arrivals.length === 0) return { events: 0 }
+  const gaps = arrivals.slice(1).map((value, index) => Math.round(value - arrivals[index]))
+  return {
+    events: arrivals.length,
+    activeMs: Math.round(arrivals.at(-1) - arrivals[0]),
+    ...(gaps.length === 0 ? {} : {
+      gapMs: {
+        p50: percentile(gaps, 0.50),
+        p95: percentile(gaps, 0.95),
+        maximum: Math.max(...gaps),
+      },
+      pausesOver100Ms: gaps.filter(value => value > 100).length,
+      pausesOver250Ms: gaps.filter(value => value > 250).length,
+    }),
+  }
+}
+
 export class CloudAcceptanceClient {
   constructor(baseUrl, cookie) {
     this.baseUrl = new URL(baseUrl)
@@ -94,6 +112,8 @@ class CloudSessionStream {
   async prompt(text, timeoutMs) {
     const rpcId = randomUUID()
     const observed = []
+    const assistantChunkArrivals = []
+    const textDeltaArrivals = []
     const startedAt = performance.now()
     let promptSeq = -1
     let firstAssistantAt
@@ -116,6 +136,11 @@ class CloudSessionStream {
       if (!Number.isSafeInteger(event?.seq)) return
       observed.push(event)
       if (event.type === 'user/message' && event.data?.source?.rpcId === rpcId) promptSeq = event.seq
+      if (promptSeq >= 0 && event.seq > promptSeq && event.type === 'assistant/chunk') {
+        const arrivedAt = performance.now()
+        assistantChunkArrivals.push(arrivedAt)
+        if (event.data?.chunk?.type === 'text-delta') textDeltaArrivals.push(arrivedAt)
+      }
       if (promptSeq >= 0 && event.seq > promptSeq && event.type === 'assistant/chunk' && firstAssistantAt === undefined) {
         firstAssistantAt = performance.now()
       }
@@ -144,6 +169,8 @@ class CloudSessionStream {
         terminal: terminalEvent,
         durationMs: Math.round(endedAt - startedAt),
         firstAssistantMs: firstAssistantAt === undefined ? undefined : Math.round(firstAssistantAt - startedAt),
+        assistantChunkFlow: eventFlow(assistantChunkArrivals),
+        textDeltaFlow: eventFlow(textDeltaArrivals),
       }
     } finally {
       clearTimeout(timeout)

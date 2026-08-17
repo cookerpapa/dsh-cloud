@@ -66,7 +66,14 @@ async function journey(index) {
       for (const expected of turn.eventIncludes ?? []) {
         if (!encoded.includes(expected)) throw new Error(`durable browser events did not contain ${expected}`)
       }
-      turns.push({ runId: result.runId, durationMs: result.durationMs, firstAssistantMs: result.firstAssistantMs, events: result.events.length })
+      turns.push({
+        runId: result.runId,
+        durationMs: result.durationMs,
+        firstAssistantMs: result.firstAssistantMs,
+        events: result.events.length,
+        assistantChunkFlow: result.assistantChunkFlow,
+        textDeltaFlow: result.textDeltaFlow,
+      })
     }
     const history = await stream.history()
     const answer = assistantText(history)
