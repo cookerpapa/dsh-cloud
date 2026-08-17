@@ -74,7 +74,7 @@ class CubeSandboxProvider implements SandboxProvider {
       throw new Error(`Cube authorization does not admit DSH Cloud Volume identities (HTTP ${own.status})`)
     }
 
-    const foreign = await this.controlRaw(`/volumes/adw-${'0'.repeat(48)}`)
+    const foreign = await this.controlRaw(`/volumes/pcw-${'0'.repeat(48)}`)
     await foreign.body?.cancel().catch(() => undefined)
     if (foreign.status !== 401) {
       throw new Error('Cube credential is not isolated to the DSH Cloud API policy')

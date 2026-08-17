@@ -3,7 +3,7 @@
 DSH Cloud owns its Cube API credential and authorization policy. Do not point
 the Tool Broker at Pi Cloud's Cube API frontend or reuse Pi Cloud's API key.
 The DSH policy admits only the control calls used by the Tool Broker and only
-`dsh-<48 hex>` persistent Volume item paths; `adw-*` Pi Cloud Volumes are
+`dsh-<48 hex>` persistent Volume item paths; `pcw-*` Pi Cloud Volumes are
 denied.
 
 The recommended deployment is a DSH-owned CubeSandbox control/compute
@@ -67,6 +67,6 @@ must use shared storage with the required consistency and durability. Do not
 point this driver at Pi Cloud's Workspace root.
 
 At startup the Tool Broker verifies both halves of the policy: an authorized,
-nonexistent `dsh-*` Volume must return 404, while an `adw-*` probe must return
+nonexistent `dsh-*` Volume must return 404, while an `pcw-*` probe must return
 401. A mismatched or shared credential therefore fails readiness before any
 model-generated Tool operation can run.

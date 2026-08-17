@@ -91,6 +91,6 @@ are image internals, not tenant-controlled settings.
 - Secrets must be supplied by deployment Secret/file mechanisms and must not
   enter Worker logs, Session events, Workspace files, or Cube environment.
 - Tool Broker startup probes the Cube callback policy: `dsh-*` Volume item
-  paths must be admitted and `adw-*` paths must be denied. This makes an
+  paths must be admitted and `pcw-*` paths must be denied. This makes an
   accidentally shared Pi Cloud credential a startup error rather than a
   delayed 401 during the first coding Turn.

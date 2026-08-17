@@ -173,7 +173,7 @@ annotations.
 
 The Cube Secret must contain the same dedicated DSH credential installed in
 `dsh-cloud-cube-api-credential`. Tool Broker startup rejects a Pi Cloud policy
-or a credential that can access both `dsh-*` and `adw-*` Volume identities.
+or a credential that can access both `dsh-*` and `pcw-*` Volume identities.
 
 KEDA runs in its own namespace, so the PostgreSQL URL stored in the Secret must
 use a fully qualified in-cluster service name (for example,

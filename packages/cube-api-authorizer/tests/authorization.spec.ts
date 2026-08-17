@@ -4,7 +4,7 @@ import { authorizeCubeApiRequest, isAllowedCubeApiOperation } from '../src/autho
 const CREDENTIAL = 'a'.repeat(64)
 const SANDBOX = 'sandbox-123'
 const DSH_VOLUME = `dsh-${'a'.repeat(48)}`
-const PI_VOLUME = `adw-${'a'.repeat(48)}`
+const PI_VOLUME = `pcw-${'a'.repeat(48)}`
 
 describe('DSH Cloud Cube API authorizer', () => {
   it.each([

@@ -4,7 +4,7 @@ import { createCubeApiAuthorizerServer } from '../src/server.js'
 
 const CREDENTIAL = 'a'.repeat(64)
 const DSH_VOLUME = `dsh-${'a'.repeat(48)}`
-const PI_VOLUME = `adw-${'a'.repeat(48)}`
+const PI_VOLUME = `pcw-${'a'.repeat(48)}`
 
 describe('Cube API callback protocol', () => {
   const servers: ReturnType<typeof createCubeApiAuthorizerServer>[] = []

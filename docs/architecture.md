@@ -172,7 +172,7 @@ DSH tool consumer
 
 DSH Cloud owns a separate CubeAPI callback policy and API key. The callback
 admits the Broker's bounded sandbox inventory/lifecycle operations and
-`dsh-<48 hex>` Workspace Volumes, while rejecting Pi Cloud's `adw-*` Volume
+`dsh-<48 hex>` Workspace Volumes, while rejecting Pi Cloud's `pcw-*` Volume
 namespace. A dedicated Cube control/compute installation is the recommended
 security boundary; trusted infrastructure may share lower-level capacity only
 through a distinct DSH CubeAPI frontend. DSH Cloud never imports or extends Pi

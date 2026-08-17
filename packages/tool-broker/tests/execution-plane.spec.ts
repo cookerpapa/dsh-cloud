@@ -209,7 +209,7 @@ describe('Cube provider contract', () => {
   it('rejects the shared Pi Cloud Cube API policy before serving Tool traffic', async () => {
     const serverPort = await port()
     const server = createHttpServer((request, response) => {
-      if (request.url?.startsWith('/volumes/adw-') === true) response.writeHead(404).end()
+      if (request.url?.startsWith('/volumes/pcw-') === true) response.writeHead(404).end()
       else response.writeHead(401).end()
     })
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(serverPort, '127.0.0.1', resolve) })
