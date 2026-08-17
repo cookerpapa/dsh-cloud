@@ -94,6 +94,17 @@ export class WorkerEventHub {
     }
   }
 
+  /** Publish a PostgreSQL-backed cloud Host projection to one tenant's browsers. */
+  publishHost(tenantId: string, payload: Record<string, unknown>): void {
+    const data=JSON.stringify({type:'server-request',rpcId:randomUUID(),method:String(payload['type']??''),payload})
+    for(const subscriber of this.subscribers.get('/api/events.host')??[]){
+      if(subscriber.tenantId!==tenantId)continue
+      subscriber.delivery=subscriber.delivery
+        .then(()=>{if(subscriber.browser.readyState===WebSocket.OPEN)subscriber.browser.send(data,{binary:false})})
+        .catch(()=>subscriber.browser.close(1011,'cloud Host projection failed'))
+    }
+  }
+
   async close(): Promise<void> {
     this.closed = true
     clearInterval(this.timer)

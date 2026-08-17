@@ -278,6 +278,37 @@ enabled('multi-tenant Cloud Gateway',()=>{
     client.close()
   })
 
+  test('projects cloud Workspace membership and archive changes to the DSH Host stream',async()=>{
+    const url=new URL('/api/events.host',baseUrl);url.protocol='ws:'
+    const client=new WebSocket(url,{headers:{cookie}})
+    await new Promise<void>((resolve,reject)=>{client.once('open',()=>resolve());client.once('error',reject)})
+    const next=(type:string,predicate:(payload:Record<string,unknown>)=>boolean=()=>true)=>new Promise<Record<string,unknown>>((resolve,reject)=>{
+      const timeout=setTimeout(()=>reject(new Error(`${type} frame timed out`)),5_000)
+      const onMessage=(data:WebSocket.RawData):void=>{
+        const value=JSON.parse(data.toString()) as {payload?:Record<string,unknown>}
+        if(value.payload?.['type']!==type||!predicate(value.payload))return
+        clearTimeout(timeout);client.off('message',onMessage);resolve(value.payload)
+      }
+      client.on('message',onMessage)
+    })
+    const createdFrame=next('host/workspace-changed')
+    const created=await fetch(`${baseUrl}/api/workspace.create`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'workspace.create',payload:{path:'Browser E2E'}})})
+    const workspaceId=((await created.json()) as {result:{value:{workspace:{workspaceId:string}}}}).result.value.workspace.workspaceId
+    expect(await createdFrame).toMatchObject({workspace:{workspaceId,sessionIds:[]}})
+
+    const allocated=randomUUID()
+    const attachedFrame=next('host/workspace-changed',payload=>(payload['workspace'] as Record<string,unknown>)?.['workspaceId']===workspaceId&&((payload['workspace'] as Record<string,unknown>)?.['sessionIds'] as string[]).includes(allocated))
+    const session=await fetch(`${baseUrl}/api/session.create`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.create',payload:{sessionId:allocated,workspaceId}})})
+    expect(await session.json()).toMatchObject({result:{ok:true,value:{sessionId:allocated}}})
+    expect(await attachedFrame).toMatchObject({workspace:{workspaceId,sessionIds:expect.arrayContaining([allocated])}})
+
+    const archiveFrame=next('host/archived-sessions-changed')
+    const archived=await fetch(`${baseUrl}/api/workspace.archiveSession`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'workspace.archiveSession',payload:{sessionId:allocated}})})
+    expect(await archived.json()).toMatchObject({result:{ok:true,value:{archivedSessionIds:[allocated]}}})
+    expect(await archiveFrame).toEqual({type:'host/archived-sessions-changed',archivedSessionIds:[allocated]})
+    client.close()
+  })
+
   test('denies upstream Host mutations that have no tenant-scoped cloud contract',async()=>{
     const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.update',payload:{patch:{}}}
     const response=await fetch(`${baseUrl}/api/settings.update`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(envelope)})

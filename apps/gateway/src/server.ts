@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from 'node:stream'
 import { Pool, type PoolClient } from 'pg'
 import { WebSocketServer } from 'ws'
-import { ControlStore, type Principal, type WorkerRecord } from '@dsh-cloud/control-store'
+import { ControlStore, type Principal, type WorkerRecord, type WorkspaceRecord } from '@dsh-cloud/control-store'
 import { loginPage } from './login.js'
 import { WorkerEventHub, type WorkerEventPath } from './worker-event-hub.js'
 
@@ -104,6 +104,10 @@ function okValue(value: unknown): Record<string,unknown>|undefined {
   if(value===null||typeof value!=='object') return undefined
   const result=(value as Record<string,unknown>)['result']; if(result===null||typeof result!=='object'||(result as Record<string,unknown>)['ok']!==true)return undefined
   const answer=(result as Record<string,unknown>)['value']; return answer!==null&&typeof answer==='object' ? answer as Record<string,unknown> : undefined
+}
+
+function workspaceView(item:WorkspaceRecord):Record<string,unknown>{
+  return {workspaceId:item.id,path:'/workspace',title:item.name,sessionIds:item.sessionIds,createdAt:item.createdAt,updatedAt:item.updatedAt}
 }
 
 export class CloudGateway {
@@ -249,6 +253,7 @@ export class CloudGateway {
       if(value!==undefined&&typeof value['sessionId']==='string'){
         await this.store.registerSession({sessionId:value['sessionId'],tenantId:principal.tenantId,workspaceId})
         this.eventHub.allowSession(principal.tenantId,value['sessionId'])
+        await this.publishWorkspace(principal.tenantId,workspaceId)
       }
       json(response,upstream.status,payload);return
     }
@@ -258,6 +263,7 @@ export class CloudGateway {
       if(workspace!==undefined&&value!==undefined&&typeof value['sessionId']==='string'){
         await this.store.registerSession({sessionId:value['sessionId'],tenantId:principal.tenantId,workspaceId:workspace.workspaceId})
         this.eventHub.allowSession(principal.tenantId,value['sessionId'])
+        await this.publishWorkspace(principal.tenantId,workspace.workspaceId)
       }
       json(response,upstream.status,payload);return
     }
@@ -382,17 +388,46 @@ export class CloudGateway {
   }
 
   private async workspace(response:ServerResponse,principal:Principal,envelope:Envelope):Promise<void>{
-    if(envelope.method==='workspace.list'){const items=(await this.store.listWorkspaces(principal.tenantId)).map(item=>({workspaceId:item.id,path:'/workspace',title:item.name,sessionIds:item.sessionIds,createdAt:item.createdAt,updatedAt:item.updatedAt}));rpc(response,envelope,{items,archivedSessionIds:[]});return}
-    if(envelope.method==='workspace.create'){const raw=String(envelope.payload['path']??'Workspace');const name=raw.split(/[\\/]/).filter(Boolean).at(-1)??'Workspace';const created=await this.store.createWorkspace(principal.tenantId,`${name}-${randomUUID().slice(0,6)}`);const item=(await this.store.listWorkspaces(principal.tenantId)).find(value=>value.id===created.id)!;rpc(response,envelope,{workspace:{workspaceId:item.id,path:'/workspace',title:item.name,sessionIds:[],createdAt:item.createdAt,updatedAt:item.updatedAt},created:true});return}
-    if(envelope.method==='workspace.rename'){const item=await this.store.renameWorkspace(principal.tenantId,String(envelope.payload['workspaceId']??''),String(envelope.payload['title']??''));if(item===undefined){rpcError(response,envelope,'workspace-not-found','Workspace was not found');return}rpc(response,envelope,{workspace:{workspaceId:item.id,path:'/workspace',title:item.name,sessionIds:item.sessionIds,createdAt:item.createdAt,updatedAt:item.updatedAt}});return}
+    if(envelope.method==='workspace.list'){const items=(await this.store.listWorkspaces(principal.tenantId)).map(workspaceView);rpc(response,envelope,{items,archivedSessionIds:await this.archivedSessions(principal)});return}
+    if(envelope.method==='workspace.create'){const raw=String(envelope.payload['path']??'Workspace');const name=raw.split(/[\\/]/).filter(Boolean).at(-1)??'Workspace';const created=await this.store.createWorkspace(principal.tenantId,`${name}-${randomUUID().slice(0,6)}`);const item=(await this.store.listWorkspaces(principal.tenantId)).find(value=>value.id===created.id)!;const workspace=workspaceView(item);this.eventHub.publishHost(principal.tenantId,{type:'host/workspace-changed',workspace});rpc(response,envelope,{workspace,created:true});return}
+    if(envelope.method==='workspace.rename'){const item=await this.store.renameWorkspace(principal.tenantId,String(envelope.payload['workspaceId']??''),String(envelope.payload['title']??''));if(item===undefined){rpcError(response,envelope,'workspace-not-found','Workspace was not found');return}const workspace=workspaceView(item);this.eventHub.publishHost(principal.tenantId,{type:'host/workspace-changed',workspace});rpc(response,envelope,{workspace});return}
     if(envelope.method==='workspace.delete'){
       const workspaceId=String(envelope.payload['workspaceId']??'')
       const reserved=await this.store.beginWorkspaceDeletion(principal.tenantId,workspaceId)
       if(!reserved){rpcError(response,envelope,'workspace-not-found','Workspace is not empty or was not found');return}
       await this.destroyWorkspace(principal.tenantId,workspaceId)
+      this.eventHub.publishHost(principal.tenantId,{type:'host/workspace-removed',workspaceId})
       rpc(response,envelope,{deleted:true});return
     }
+    if(envelope.method==='workspace.archiveSession'){
+      const archived=String(envelope.payload['sessionId']??'')
+      if(!await this.store.ownsSession(principal.tenantId,archived)){rpcError(response,envelope,'session-not-found','Session was not found');return}
+      const archivedSessionIds=await this.mutateUserStringList(principal,'workspace.archived-session-ids',current=>current.includes(archived)?current:[...current,archived])
+      this.eventHub.publishHost(principal.tenantId,{type:'host/archived-sessions-changed',archivedSessionIds})
+      rpc(response,envelope,{archivedSessionIds});return
+    }
     rpcError(response,envelope,'forbidden','Workspace ordering and archive operations are not available in this cloud profile')
+  }
+
+  private async publishWorkspace(tenantId:string,workspaceId:string):Promise<void>{
+    const item=(await this.store.listWorkspaces(tenantId)).find(candidate=>candidate.id===workspaceId)
+    if(item!==undefined)this.eventHub.publishHost(tenantId,{type:'host/workspace-changed',workspace:workspaceView(item)})
+  }
+
+  private async archivedSessions(principal:Principal):Promise<string[]>{
+    const preference=await this.store.userPreference(principal.userId,'workspace.archived-session-ids')
+    return Array.isArray(preference?.value)?preference.value.filter((value):value is string=>typeof value==='string'):[]
+  }
+
+  private async mutateUserStringList(principal:Principal,key:string,change:(current:string[])=>string[]):Promise<string[]>{
+    for(let attempt=0;attempt<5;attempt++){
+      const current=await this.store.userPreference(principal.userId,key)
+      const values=Array.isArray(current?.value)?current.value.filter((value):value is string=>typeof value==='string'):[]
+      const next=change(values)
+      const saved=await this.store.setUserPreference(principal.userId,key,next,current?.revision??0)
+      if(saved!==undefined)return saved.value as string[]
+    }
+    throw new Error('concurrent user Workspace preference update did not converge')
   }
 
   private async fetchWorker(worker:WorkerRecord,path:string,request:IncomingMessage,body:Buffer):Promise<Response>{
