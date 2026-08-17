@@ -611,11 +611,14 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
       await this.reconcileProjection(client, meta.id, priorSealed, priorProjected)
       await this.publishLiveBatches(client, meta.id, events, authority)
       await this.assertControlAuthority(client, authority, meta)
-      const sealedThrough = await this.sealCompletedTurns(
-        client,
-        meta.id,
-        priorSealed,
-      )
+      // A live delta batch cannot complete a Turn. Reading the entire hot tail
+      // from Kafka here used to put a multi-second consumer startup/read on
+      // every 40 ms streaming batch, so newly produced chunks accumulated and
+      // reached the browser in large bursts. Only a batch carrying the native
+      // terminal marker can advance the sealed prefix.
+      const sealedThrough = events.some(event => event.type === 'turn/end')
+        ? await this.sealCompletedTurns(client, meta.id, priorSealed)
+        : priorSealed
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
         SET next_seq = $3,
@@ -690,7 +693,9 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
         await this.publishLiveBatches(client, meta.id, closers, authority)
       }
       await this.assertControlAuthority(client, authority, meta)
-      const repairedSealedThrough = await this.sealCompletedTurns(client, meta.id, sealedThrough)
+      const repairedSealedThrough = closers.some(event => event.type === 'turn/end')
+        ? await this.sealCompletedTurns(client, meta.id, sealedThrough)
+        : sealedThrough
       await client.query(`
         UPDATE ${SQL_SCHEMA}.sessions
         SET next_seq = $3,

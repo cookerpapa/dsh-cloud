@@ -503,6 +503,29 @@ integration('TieredSessionPersistence', () => {
     }
   })
 
+  it('does not reread the Kafka hot tail for non-terminal streaming batches', async () => {
+    const namespace = `test-${randomUUID()}`
+    const { ctx } = await backend(namespace)
+    const meta = header('streaming-hot-path')
+    const log = completedTurn()
+    let reads = 0
+    const originalRead = ctx.sessionLiveLog.read.bind(ctx.sessionLiveLog)
+    ctx.sessionLiveLog.read = async (...args) => {
+      reads += 1
+      return originalRead(...args)
+    }
+
+    await ctx.sessionPersistence.create(meta)
+    await ctx.cloudRunContext.run(authority(meta.id, 1), () =>
+      ctx.sessionPersistence.append(meta.id, log.slice(0, -3)))
+    expect(reads).toBe(0)
+
+    await ctx.cloudRunContext.run(authority(meta.id, 1), () =>
+      ctx.sessionPersistence.append(meta.id, log.slice(-3)))
+    expect(reads).toBeGreaterThan(0)
+    expect((await ctx.sessionPersistence.load(meta.id)).events).toEqual(log)
+  })
+
   it('restores the effective runtime surface from a compaction baseline without reading its physical prefix', async () => {
     const namespace = `test-${randomUUID()}`
     const first = await backend(namespace)

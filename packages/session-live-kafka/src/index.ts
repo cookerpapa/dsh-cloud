@@ -152,36 +152,86 @@ class KafkaSessionLiveLog extends SessionLiveLog {
       consumer.once('event.error', (cause: unknown) => reject(cause))
       consumer.connect()
     })
+    const expected = locations.map(location => {
+      const partition = location.locator['partition']
+      const offset = location.locator['offset']
+      const numericOffset = typeof offset === 'string' && /^\d+$/.test(offset)
+        ? Number(offset)
+        : Number.NaN
+      if (!Number.isSafeInteger(partition) || (partition as number) < 0
+        || !Number.isSafeInteger(numericOffset) || numericOffset < 0) {
+        throw new Error('Kafka Session location is invalid')
+      }
+      return {
+        location,
+        partition: partition as number,
+        offset: String(offset),
+        numericOffset,
+      }
+    })
     const envelopes: SessionEventEnvelope[] = []
     try {
-      for (const location of locations) {
+      let start = 0
+      while (start < expected.length) {
         signal?.throwIfAborted()
-        const partition = location.locator['partition']
-        const offset = location.locator['offset']
-        if (!Number.isSafeInteger(partition) || (partition as number) < 0
-          || typeof offset !== 'string' || !/^\d+$/.test(offset)) {
-          throw new Error('Kafka Session location is invalid')
+        const first = expected[start]!
+        let end = start + 1
+        let previousOffset = first.numericOffset
+        while (end < expected.length && expected[end]!.partition === first.partition) {
+          const nextOffset = expected[end]!.numericOffset
+          if (nextOffset <= previousOffset) {
+            throw new Error('Kafka Session locations are not strictly ordered')
+          }
+          previousOffset = nextOffset
+          end += 1
         }
-        consumer.assign([{ topic: this.topic, partition: partition as number, offset: Number(offset) }])
-        const messages = await new Promise<Message[]>((resolve, reject) => {
-          consumer.consume(1, (error, value) => error ? reject(error) : resolve(value))
-        })
-        const message = messages[0]
-        if (message === undefined
-          || message.partition !== partition
-          || String(message.offset) !== offset
-          || message.value === null) {
-          throw new Error(`Kafka active Session tail is missing offset ${partition}:${offset}`)
+        // All records for one Session normally hash to one Kafka partition.
+        // Seek once and scan forward, skipping interleaved records belonging to
+        // other Sessions. Reassigning before every locator adds a large fixed
+        // librdkafka cost and used to make Turn sealing linear in batch count.
+        consumer.assign([{
+          topic: this.topic,
+          partition: first.partition,
+          offset: first.numericOffset,
+        }])
+        let index = start
+        while (index < end) {
+          signal?.throwIfAborted()
+          const target = expected[index]!
+          const messages = await new Promise<Message[]>((resolve, reject) => {
+            consumer.consume(1, (error, value) => error ? reject(error) : resolve(value))
+          })
+          const message = messages[0]
+          if (message === undefined || message.value === null) {
+            throw new Error(
+              `Kafka active Session tail is missing offset ${target.partition}:${target.offset}`,
+            )
+          }
+          if (message.partition !== target.partition) {
+            throw new Error('Kafka returned a Session record from an unexpected partition')
+          }
+          const currentOffset = String(message.offset)
+          const current = BigInt(currentOffset)
+          const wanted = BigInt(target.offset)
+          if (current < wanted) continue
+          if (current > wanted) {
+            throw new Error(
+              `Kafka active Session tail is missing offset ${target.partition}:${target.offset}`,
+            )
+          }
+          const envelope = parseSessionEventEnvelope(JSON.parse(message.value.toString()) as unknown)
+          const location = target.location
+          if (envelope.namespace !== namespace
+            || envelope.sessionId !== sessionId
+            || envelope.seq !== location.seq
+            || envelope.seqEnd !== location.seqEnd
+            || sessionEventEnvelopeDigest(envelope) !== location.digest) {
+            throw new Error(`Kafka active Session tail failed identity or digest validation at seq ${location.seq}`)
+          }
+          envelopes.push(envelope)
+          index += 1
         }
-        const envelope = parseSessionEventEnvelope(JSON.parse(message.value.toString()) as unknown)
-        if (envelope.namespace !== namespace
-          || envelope.sessionId !== sessionId
-          || envelope.seq !== location.seq
-          || envelope.seqEnd !== location.seqEnd
-          || sessionEventEnvelopeDigest(envelope) !== location.digest) {
-          throw new Error(`Kafka active Session tail failed identity or digest validation at seq ${location.seq}`)
-        }
-        envelopes.push(envelope)
+        start = end
       }
     } finally {
       await new Promise<void>(resolve => consumer.disconnect(() => resolve()))

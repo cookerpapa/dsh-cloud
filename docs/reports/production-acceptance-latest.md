@@ -62,6 +62,36 @@ Canonical Session history recovered the completed Turn and exact prior token
 in 3.16 seconds. This verifies both rapid follow-up fencing and refresh after
 admission rather than only reconnecting after a Turn has settled.
 
+## Durable streaming cadence regression
+
+An end-to-end browser-style WebSocket probe recorded the arrival time of every
+native `assistant/chunk` while DeepSeek generated an approximately 800-character
+Chinese answer. Before the hot-path fix, 737 chunks reached the browser in only
+five large bursts: the median burst contained 152 chunks and the pauses between
+bursts were 3.09 seconds at p50 and 4.09 seconds at maximum.
+
+Two persistence bottlenecks were removed without weakening the visibility
+barrier:
+
+- non-terminal batches no longer reread the entire Kafka hot tail when no
+  `turn/end` marker can possibly be sealed;
+- terminal sealing seeks once per Session partition and scans Kafka offsets in
+  order, instead of repeating `assign + consume(1)` for every batch locator.
+
+The repeated real-model probe produced 763 chunks in 167 bounded bursts. The
+median burst contained 4 chunks (p95 8), and the gap between bursts was 55 ms at
+p50, 81 ms at p95 and 204 ms at maximum. Durable first text arrived in 3.73
+seconds and the complete Turn settled in 13.55 seconds. The Gateway still waits
+for the Kafka/Valkey/PostgreSQL projected-through watermark before exposing a
+chunk; the improvement comes from removing redundant reads, not from showing
+uncommitted model output.
+
+A separate Cube regression then completed two consecutive coding Turns in the
+same Workspace in 10.63 and 9.39 seconds. The first created and tested insertion
+sort; the second retained it, added binary search and reran both Python suites.
+A refresh-after-follow-up test also recovered the exact prior token and settled
+the second Turn in 1.37 seconds.
+
 ## Native Compaction baseline and cold Worker recovery
 
 The same Session was compacted using the real DeepSeek summarizer. Because the
