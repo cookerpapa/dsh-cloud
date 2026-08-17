@@ -116,6 +116,8 @@ class CloudSessionStream {
     const textDeltaArrivals = []
     const startedAt = performance.now()
     let promptSeq = -1
+    let userMessageAt
+    let promptAcceptedAt
     let firstAssistantAt
     let resolveTerminal
     let rejectTerminal
@@ -135,7 +137,10 @@ class CloudSessionStream {
       const event = payload.event
       if (!Number.isSafeInteger(event?.seq)) return
       observed.push(event)
-      if (event.type === 'user/message' && event.data?.source?.rpcId === rpcId) promptSeq = event.seq
+      if (event.type === 'user/message' && event.data?.source?.rpcId === rpcId) {
+        promptSeq = event.seq
+        userMessageAt ??= performance.now()
+      }
       if (promptSeq >= 0 && event.seq > promptSeq && event.type === 'assistant/chunk') {
         const arrivedAt = performance.now()
         assistantChunkArrivals.push(arrivedAt)
@@ -160,6 +165,7 @@ class CloudSessionStream {
         content: [{ type: 'text', text }],
         clientTimeZone: 'Asia/Shanghai',
       }, rpcId)
+      promptAcceptedAt = performance.now()
       const terminalEvent = await terminal
       const endedAt = performance.now()
       return {
@@ -168,6 +174,8 @@ class CloudSessionStream {
         events: observed,
         terminal: terminalEvent,
         durationMs: Math.round(endedAt - startedAt),
+        userMessageMs: userMessageAt === undefined ? undefined : Math.round(userMessageAt - startedAt),
+        promptAcceptedMs: Math.round(promptAcceptedAt - startedAt),
         firstAssistantMs: firstAssistantAt === undefined ? undefined : Math.round(firstAssistantAt - startedAt),
         assistantChunkFlow: eventFlow(assistantChunkArrivals),
         textDeltaFlow: eventFlow(textDeltaArrivals),

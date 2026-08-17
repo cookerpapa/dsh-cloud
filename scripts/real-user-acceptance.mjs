@@ -37,6 +37,8 @@ try {
     workspaceId: acceptance.workspaceId,
     runId: result.runId,
     durationMs: result.durationMs,
+    userMessageMs: result.userMessageMs,
+    promptAcceptedMs: result.promptAcceptedMs,
     firstAssistantMs: result.firstAssistantMs,
     assistantChunkFlow: result.assistantChunkFlow,
     textDeltaFlow: result.textDeltaFlow,

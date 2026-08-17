@@ -51,6 +51,7 @@ const SQL_SCHEMA = 'dsh_cloud'
 const DEFAULT_NAMESPACE = 'local'
 const SEGMENT_CODEC = 'dsh-storage-records+json+gzip-v1'
 const RUNTIME_BASELINE_CODEC = 'dsh-runtime-baseline+json+gzip-v1'
+const LOCAL_RETIREMENT_WAIT_MS = 5_000
 
 interface SessionRow {
   header: SessionHeader
@@ -455,8 +456,19 @@ class TieredSessionPersistence extends SessionPersistence implements Persistence
     }
   }
 
-  override prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
-    return this.coordinator.prepare(id, signal)
+  override async prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation> {
+    const deadline = Date.now() + LOCAL_RETIREMENT_WAIT_MS
+    for (;;) {
+      try {
+        return await this.coordinator.prepare(id, signal)
+      } catch (error: unknown) {
+        const retiring = error instanceof Error
+          && error.message === `session "${id}" already has a live persistence owner`
+        if (!retiring || Date.now() >= deadline) throw error
+        signal?.throwIfAborted()
+        await new Promise<void>(resolve => setTimeout(resolve, 25))
+      }
+    }
   }
 
   async load(id: SessionId): Promise<SessionInspection> {
