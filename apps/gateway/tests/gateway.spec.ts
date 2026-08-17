@@ -43,7 +43,13 @@ enabled('multi-tenant Cloud Gateway',()=>{
       if(envelope.method==='agentPreset.select')value={agentPreset:envelope.payload['agentPreset']}
       if(envelope.method==='session.list')value={items:[{sessionId:ownedSession},{sessionId:'foreign-session'}]}
       if(envelope.method==='session.history')value={events:[],hasMore:false}
-      if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[{ns:'ui-onboarding',schema:{},value:{},applies:'live',secrets:[],revision:0}]}
+      if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[
+        {ns:'ui-onboarding',schema:{},value:{},applies:'live',secrets:[],revision:0},
+        {ns:'ui-theme',schema:{},value:{preference:'system'},applies:'live',secrets:[],revision:0},
+        {ns:'locale',schema:{},value:{},applies:'live',secrets:[],revision:0},
+        {ns:'ui-conversation',schema:{},value:{busyEnter:'queue'},applies:'live',secrets:[],revision:0},
+        {ns:'llm-deepseek',schema:{},value:{apiKeyEnv:'DEEPSEEK_API_KEY'},applies:'live',secrets:[],revision:0},
+      ]}
       const body=JSON.stringify({type:'server-response',rpcId:envelope.rpcId,result:{ok:true,value}});response.writeHead(200,{'content-type':'application/json','content-length':String(Buffer.byteLength(body))});response.end(body)
     })
     fakeSockets=new WebSocketServer({noServer:true})
@@ -121,11 +127,26 @@ enabled('multi-tenant Cloud Gateway',()=>{
       const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.describe',payload:{}}
       return (await (await fetch(`${baseUrl}/api/settings.describe`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:baseUrl},body:JSON.stringify(envelope)})).json()) as {result:{value:{writable:boolean;namespaces:Array<{ns:string;value:Record<string,unknown>;revision:number}>}}}
     }
-    expect((await describe()).result.value).toMatchObject({writable:false,namespaces:[{ns:'ui-onboarding',value:{},revision:0}]})
+    const initial=(await describe()).result.value
+    expect(initial).toMatchObject({writable:true,hasDocument:false})
+    expect(initial.namespaces.map(item=>item.ns)).toEqual(['ui-onboarding','ui-theme','locale','ui-conversation'])
+    expect(initial.namespaces[1]).toMatchObject({ns:'ui-theme',value:{preference:'system'},revision:0})
+    expect(initial.namespaces[3]).toMatchObject({ns:'ui-conversation',value:{busyEnter:'queue'},revision:0})
     const envelope={type:'client-request',rpcId:randomUUID(),method:'settings.mutate',payload:{ns:'ui-onboarding',ops:[{op:'set',path:['welcomeNoticeVersion'],value:'acceptance-v1'}]}}
     const saved=await fetch(`${baseUrl}/api/settings.mutate`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:baseUrl},body:JSON.stringify(envelope)})
     expect(await saved.json()).toMatchObject({result:{ok:true,value:{ns:'ui-onboarding',value:{welcomeNoticeVersion:'acceptance-v1'},revision:1}}})
     expect((await describe()).result.value.namespaces[0]).toMatchObject({value:{welcomeNoticeVersion:'acceptance-v1'},revision:1})
+
+    const themeEnvelope={type:'client-request',rpcId:randomUUID(),method:'settings.mutate',payload:{ns:'ui-theme',ops:[{op:'set',path:['preference'],value:'dark'}]}}
+    const theme=await fetch(`${baseUrl}/api/settings.mutate`,{method:'POST',headers:{cookie,'content-type':'application/json',origin:baseUrl},body:JSON.stringify(themeEnvelope)})
+    expect(await theme.json()).toMatchObject({result:{ok:true,value:{ns:'ui-theme',value:{preference:'dark'},revision:1}}})
+    expect((await describe()).result.value.namespaces[1]).toMatchObject({ns:'ui-theme',value:{preference:'dark'},revision:1})
+  })
+
+  test('describes cloud-safe Host capabilities instead of advertising local path opening',async()=>{
+    const envelope={type:'client-request',rpcId:randomUUID(),method:'host.describe',payload:{}}
+    const response=await fetch(`${baseUrl}/api/host.describe`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(envelope)})
+    expect(await response.json()).toMatchObject({result:{ok:true,value:{cwd:'/workspaces',canOpenPath:false}}})
   })
 
   test('admits prompts to PostgreSQL instead of invoking the Host directly',async()=>{

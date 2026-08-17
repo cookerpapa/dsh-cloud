@@ -11,6 +11,12 @@ const MAX_BODY_BYTES = 160 * 1024 * 1024
 const AUTH_COOKIE = 'dsh_cloud_session'
 const CLOUD_WORKSPACE_ROOT = '/workspaces'
 const WELCOME_PREFERENCE_KEY = 'ui-onboarding.welcomeNoticeVersion'
+const USER_SETTING_RULES = new Map<string,{field:string;valid:(value:unknown)=>boolean;preferenceKey:string}>([
+  ['ui-onboarding',{field:'welcomeNoticeVersion',valid:value=>typeof value==='string'&&value.length<=100,preferenceKey:WELCOME_PREFERENCE_KEY}],
+  ['ui-theme',{field:'preference',valid:value=>value==='light'||value==='dark'||value==='system',preferenceKey:'ui-theme.preference'}],
+  ['locale',{field:'preference',valid:value=>value==='zh'||value==='en',preferenceKey:'locale.preference'}],
+  ['ui-conversation',{field:'busyEnter',valid:value=>value==='queue'||value==='steer',preferenceKey:'ui-conversation.busyEnter'}],
+])
 const SESSION_METHODS = new Set(['session.history','session.models','session.selectModel','session.rename','session.attachment','session.updateQueue','session.cancel','session.prompt','session.fork','agentPreset.select'])
 const READ_ONLY_HOST_METHODS = new Set([
   'host.describe',
@@ -227,6 +233,10 @@ export class CloudGateway {
       :(await this.store.activeRunWorker(principal.tenantId,sid))??await this.store.selectWorker()
     if(worker===undefined){rpcError(response,envelope,'internal','No healthy DSH Worker is available',503);return}
     if(envelope.method==='settings.describe'||envelope.method==='settings.mutate'){await this.cloudSettings(response,principal,worker,envelope,request);return}
+    if(envelope.method==='host.describe'){
+      const upstream=await this.fetchWorker(worker,path,request,body)
+      await copyResponse(upstream,response,value=>{const answer=okValue(value);if(answer!==undefined){answer['cwd']=CLOUD_WORKSPACE_ROOT;answer['canOpenPath']=false}return value});return
+    }
     if(envelope.method==='session.create'){
       const agentPreset=envelope.payload['agentPreset']
       if(agentPreset!==undefined&&(typeof agentPreset!=='string'||!this.allowedAgentPresets.has(agentPreset))){rpcError(response,envelope,'agent-preset-not-found','Agent preset is not enabled for this cloud deployment');return}
@@ -269,7 +279,7 @@ export class CloudGateway {
       await copyResponse(upstream,response,value=>{
         const answer=okValue(value)
         if(answer===undefined||!Array.isArray(answer['presets']))return value
-        answer['presets']=(answer['presets'] as Array<Record<string,unknown>>).filter(preset=>preset['trust']==='system'&&typeof preset['id']==='string'&&this.allowedAgentPresets.has(preset['id']))
+        answer['presets']=(answer['presets'] as Array<Record<string,unknown>>).filter(preset=>preset['trust']==='system'&&typeof preset['id']==='string'&&this.allowedAgentPresets.has(preset['id'])).map(preset=>({...preset,description:preset['id']==='code'?'云端 PTC 编码模式；文件、命令和测试在隔离执行环境中运行。':'云端标准编码模式；对话可跨 Worker 恢复，工具调用进入隔离执行环境。'}))
         answer['authorable']=false
         answer['hasDocument']=false
         return value
@@ -319,34 +329,42 @@ export class CloudGateway {
       const operations=envelope.payload['ops']
       const operation=Array.isArray(operations)&&operations.length===1?operations[0] as Record<string,unknown>:undefined
       const path=operation?.['path']
-      const version=operation?.['value']
+      const value=operation?.['value']
       const expected=envelope.payload['expectedRevision']
-      if(envelope.payload['ns']!=='ui-onboarding'||operation?.['op']!=='set'||!Array.isArray(path)||path.length!==1||path[0]!=='welcomeNoticeVersion'||typeof version!=='string'||version.length>100||!(expected===undefined||Number.isSafeInteger(expected))){
-        rpcError(response,envelope,'settings-not-exposed','Only the per-user welcome acknowledgement is writable in this cloud profile');return
+      const ns=typeof envelope.payload['ns']==='string'?envelope.payload['ns']:''
+      const rule=USER_SETTING_RULES.get(ns)
+      if(rule===undefined||operation?.['op']!=='set'||!Array.isArray(path)||path.length!==1||path[0]!==rule.field||!rule.valid(value)||!(expected===undefined||Number.isSafeInteger(expected))){
+        rpcError(response,envelope,'settings-not-exposed','Only safe per-user interface settings are writable in this cloud profile');return
       }
-      const saved=await this.store.setUserPreference(principal.userId,WELCOME_PREFERENCE_KEY,version,expected as number|undefined)
-      if(saved===undefined){rpcError(response,envelope,'settings-conflict','Welcome acknowledgement was changed by another request');return}
-      const view=await this.welcomeSettingsView(worker,request,envelope,saved)
+      const saved=await this.store.setUserPreference(principal.userId,rule.preferenceKey,value,expected as number|undefined)
+      if(saved===undefined){rpcError(response,envelope,'settings-conflict','Interface settings were changed by another request');return}
+      const view=await this.userSettingsView(worker,request,envelope,ns,saved)
       rpc(response,envelope,view);return
     }
     const upstream=await this.fetchSettingsDescription(worker,request,envelope)
     const payload=await upstream.json() as Record<string,unknown>
     const value=okValue(payload)
     if(value===undefined||!Array.isArray(value['namespaces']))throw new Error('Worker returned an invalid settings descriptor')
-    const preference=await this.store.userPreference(principal.userId,WELCOME_PREFERENCE_KEY)
-    const view=(value['namespaces'] as Array<Record<string,unknown>>).find(item=>item['ns']==='ui-onboarding')
-    if(view!==undefined)this.applyWelcomePreference(view,preference)
-    value['writable']=false
+    const namespaces=(value['namespaces'] as Array<Record<string,unknown>>).filter(item=>typeof item['ns']==='string'&&USER_SETTING_RULES.has(item['ns']))
+    for(const view of namespaces){
+      const ns=view['ns'] as string
+      const rule=USER_SETTING_RULES.get(ns)!
+      this.applyUserPreference(view,rule,await this.store.userPreference(principal.userId,rule.preferenceKey))
+    }
+    value['namespaces']=namespaces
+    value['writable']=true
+    value['hasDocument']=false
     json(response,upstream.status,payload)
   }
 
-  private async welcomeSettingsView(worker:WorkerRecord,request:IncomingMessage,envelope:Envelope,preference:{value:unknown;revision:number}):Promise<Record<string,unknown>>{
+  private async userSettingsView(worker:WorkerRecord,request:IncomingMessage,envelope:Envelope,ns:string,preference:{value:unknown;revision:number}):Promise<Record<string,unknown>>{
     const upstream=await this.fetchSettingsDescription(worker,request,envelope)
     const payload=await upstream.json()
     const value=okValue(payload)
-    const view=value!==undefined&&Array.isArray(value['namespaces'])?(value['namespaces'] as Array<Record<string,unknown>>).find(item=>item['ns']==='ui-onboarding'):undefined
-    if(view===undefined)throw new Error('Worker did not expose ui-onboarding settings')
-    this.applyWelcomePreference(view,preference)
+    const view=value!==undefined&&Array.isArray(value['namespaces'])?(value['namespaces'] as Array<Record<string,unknown>>).find(item=>item['ns']===ns):undefined
+    const rule=USER_SETTING_RULES.get(ns)
+    if(view===undefined||rule===undefined)throw new Error(`Worker did not expose ${ns} settings`)
+    this.applyUserPreference(view,rule,preference)
     return view
   }
 
@@ -355,10 +373,11 @@ export class CloudGateway {
     return this.fetchWorker(worker,'/api/settings.describe',request,Buffer.from(JSON.stringify(forwarded)))
   }
 
-  private applyWelcomePreference(view:Record<string,unknown>,preference:{value:unknown;revision:number}|undefined):void{
-    const value=typeof preference?.value==='string'?{welcomeNoticeVersion:preference.value}:{}
-    view['value']=value
-    if(preference===undefined)delete view['user'];else view['user']=value
+  private applyUserPreference(view:Record<string,unknown>,rule:{field:string;valid:(value:unknown)=>boolean},preference:{value:unknown;revision:number}|undefined):void{
+    if(preference===undefined){delete view['user'];view['revision']=0;return}
+    const value=rule.valid(preference.value)?{[rule.field]:preference.value}:{}
+    view['value']={...(view['value']!==null&&typeof view['value']==='object'?view['value'] as Record<string,unknown>:{}),...value}
+    view['user']=value
     view['revision']=preference?.revision??0
   }
 
