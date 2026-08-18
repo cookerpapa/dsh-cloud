@@ -25,6 +25,9 @@
 - id: ui-settings-plugin-inventory
   disabled: true
 
+- id: ui-settings-plugins
+  disabled: true
+
 - id: ui-message-feedback
   disabled: true
 

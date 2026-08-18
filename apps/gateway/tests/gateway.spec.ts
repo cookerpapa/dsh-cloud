@@ -23,6 +23,8 @@ enabled('multi-tenant Cloud Gateway',()=>{
   beforeAll(async()=>{
     fake=createServer(async(request,response)=>{
       if(request.url==='/'&&request.method==='GET'){response.writeHead(200,{'content-type':'text/html'});response.end('<main>official dsh ui</main>');return}
+      if(request.url==='/manifest.webmanifest'&&request.method==='GET'){response.writeHead(200,{'content-type':'application/manifest+json'});response.end('{"name":"DSH"}');return}
+      if(request.url==='/favicon.svg'&&request.method==='GET'){response.writeHead(200,{'content-type':'image/svg+xml'});response.end('<svg xmlns="http://www.w3.org/2000/svg"/>');return}
       if(request.url==='/v1/workspaces/destroy'&&request.method==='POST'){response.writeHead(200,{'content-type':'application/json'});response.end('{"deleted":true}');return}
       const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));const envelope=JSON.parse(Buffer.concat(chunks).toString('utf8')) as {rpcId:string;method:string;payload:Record<string,unknown>}
       if(request.url==='/api/respond'){
@@ -42,7 +44,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
       ],authorable:true,hasDocument:true}
       if(envelope.method==='agentPreset.select')value={agentPreset:envelope.payload['agentPreset']}
       if(envelope.method==='session.list')value={items:[{sessionId:ownedSession},{sessionId:'foreign-session'}]}
-      if(envelope.method==='session.history')value={events:[],hasMore:false}
+      if(envelope.method==='session.history')value={events:[],hasMore:false,projections:{asOfSeq:0,values:{permissions:{options:[{value:'read-only',name:'read-only'},{value:'workspace-write',name:'workspace-write'},{value:'danger-full-access',name:'danger-full-access'}],currentValue:'workspace-write'}}}}
       if(envelope.method==='session.models')value={current:{provider:'deepseek-official',model:'deepseek-v4-flash'},routable:true,groups:[],failures:[]}
       if(envelope.method==='subagent.list')value={entries:[],parentAvailable:true}
       if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[
@@ -79,6 +81,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
 
   test('requires login, creates a tenant and serves the upstream UI',async()=>{
     expect(await (await fetch(baseUrl)).text()).toContain('登录后进入')
+    expect(await (await fetch(`${baseUrl}/manifest.webmanifest`)).json()).toEqual({name:'DSH'})
     const registered=await fetch(`${baseUrl}/cloud/register`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'A',email:'a@example.test',password:'a secure password'})})
     expect(registered.status).toBe(200);cookie=registered.headers.get('set-cookie')!.split(';')[0]!
     expect(await (await fetch(baseUrl,{headers:{cookie}})).text()).toContain('official dsh ui')
@@ -218,7 +221,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
   test('forwards tenant-owned Session reads after the ownership check',async()=>{
     const response=await fetch(`${baseUrl}/api/session.history`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.history',payload:{sessionId:ownedSession}})})
     const value=await response.json() as {result:{ok:boolean;value:{events:unknown[]}}}
-    expect(value.result).toMatchObject({ok:true,value:{events:[]}})
+    expect(value.result).toMatchObject({ok:true,value:{events:[],projections:{values:{permissions:{currentValue:'workspace-write',options:[{value:'workspace-write'}]}}}}})
   })
 
   test('serves a cloud Workspace namespace instead of exposing Worker directories',async()=>{

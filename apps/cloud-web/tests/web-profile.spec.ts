@@ -106,6 +106,7 @@ integration('Cloud Web profile', () => {
     expect(html).toContain('window.__DSH_BOOT__')
     expect(html).toContain('@deepseek-ai/dsh-client-ui-conversation')
     expect(html).not.toContain('@deepseek-ai/dsh-client-ui-settings-plugin-inventory')
+    expect(html).not.toContain('@deepseek-ai/dsh-client-ui-settings-plugins')
     expect(html).not.toContain('@deepseek-ai/dsh-client-ui-message-feedback')
     expect(html).not.toContain('@deepseek-ai/dsh-client-ui-permission-presets')
     expect(await realpath(stalePlugin)).toContain('run-admission')

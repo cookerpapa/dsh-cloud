@@ -10,6 +10,7 @@ import { WorkerEventHub, type WorkerEventPath } from './worker-event-hub.js'
 const MAX_BODY_BYTES = 160 * 1024 * 1024
 const AUTH_COOKIE = 'dsh_cloud_session'
 const CLOUD_WORKSPACE_ROOT = '/workspaces'
+const PUBLIC_UI_ASSETS = new Set(['/manifest.webmanifest','/favicon.svg'])
 const WELCOME_PREFERENCE_KEY = 'ui-onboarding.welcomeNoticeVersion'
 const USER_SETTING_RULES = new Map<string,{field:string;valid:(value:unknown)=>boolean;preferenceKey:string}>([
   ['ui-onboarding',{field:'welcomeNoticeVersion',valid:value=>typeof value==='string'&&value.length<=100,preferenceKey:WELCOME_PREFERENCE_KEY}],
@@ -116,6 +117,25 @@ function okValue(value: unknown): Record<string,unknown>|undefined {
   const answer=(result as Record<string,unknown>)['value']; return answer!==null&&typeof answer==='object' ? answer as Record<string,unknown> : undefined
 }
 
+function fixedPermissionProjection(value:unknown):void{
+  if(value===null||typeof value!=='object')return
+  const projection=(value as Record<string,unknown>)['permissions']
+  if(projection===null||typeof projection!=='object')return
+  const permissions=projection as Record<string,unknown>
+  const current=permissions['currentValue']
+  const options=permissions['options']
+  if(typeof current!=='string'||!Array.isArray(options))return
+  permissions['options']=options.filter(option=>option!==null&&typeof option==='object'&&(option as Record<string,unknown>)['value']===current)
+}
+
+function restrictHistoryPermissions(value:unknown):unknown{
+  const answer=okValue(value)
+  const projections=answer?.['projections']
+  const values=projections!==null&&typeof projections==='object'?(projections as Record<string,unknown>)['values']:undefined
+  fixedPermissionProjection(values)
+  return value
+}
+
 function workspaceView(item:WorkspaceRecord):Record<string,unknown>{
   return {workspaceId:item.id,path:'/workspace',title:item.name,sessionIds:item.sessionIds,createdAt:item.createdAt,updatedAt:item.updatedAt}
 }
@@ -199,6 +219,10 @@ export class CloudGateway {
       const token=cookies(request)[AUTH_COOKIE];if(token!==undefined)await this.store.revokeAuthSession(token);json(response,200,{ok:true},{'set-cookie':this.clearCookie()});return
     }
     if(path==='/cloud/me'){if(principal===undefined){json(response,401,{error:'unauthorized'});return}json(response,200,principal);return}
+    if(principal===undefined&&request.method==='GET'&&PUBLIC_UI_ASSETS.has(path)){
+      const worker=await this.store.selectWorker();if(worker===undefined){json(response,503,{error:'no healthy DSH Worker'});return}
+      await this.proxy(worker,request,response,Buffer.alloc(0));return
+    }
     if(principal===undefined){if(request.method==='GET'){response.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});response.end(loginPage)}else json(response,401,{error:'unauthorized'});return}
     if(path.startsWith('/api/')){
       const body=await bytes(request)
@@ -225,6 +249,7 @@ export class CloudGateway {
     if(envelope.method.startsWith('workspace.')){await this.workspace(response,principal,envelope);return}
     if(envelope.method==='host.listDirectory'||envelope.method==='host.createDirectory'){this.cloudDirectory(response,envelope);return}
     if(envelope.method==='dynamicCordisRunner/inventory'){rpc(response,envelope,[]);return}
+    if(envelope.method==='dynamicCordisRunner/syncInspectManifest'){rpc(response,envelope,null);return}
     const auxiliarySid=auxiliarySessionId(envelope)
     if(auxiliarySid!==undefined&&!await this.store.ownsSession(principal.tenantId,auxiliarySid)){rpcError(response,envelope,'session-not-found','Session was not found');return}
     // This cloud profile exposes no user-installed slash commands or Skills.
@@ -301,7 +326,7 @@ export class CloudGateway {
       return
     }
     if(SESSION_METHODS.has(envelope.method)){
-      await copyResponse(await this.fetchWorker(worker,path,request,body),response)
+      await copyResponse(await this.fetchWorker(worker,path,request,body),response,envelope.method==='session.history'?restrictHistoryPermissions:undefined)
       return
     }
     if(envelope.method==='agentPreset.list'){
