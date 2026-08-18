@@ -96,6 +96,12 @@ export class CloudAgentResidency extends Service {
       return
     }
     this.clearTimer(entry)
+    // A freshly created or read-materialized Agent has never owned a Run fence.
+    // RunAdmission can bind its first authority in place, avoiding a pointless
+    // dispose/resume cycle before the first user/message becomes durable. Once
+    // an Agent has run, cold disposal remains mandatory so a later Attempt
+    // cannot inherit the previous writer's process-local state.
+    if (!entry.sawRunning) return
     if (entry.handle.agent.status !== 'idle') await entry.handle.agent.whenIdle()
     if (this.tracked.get(sessionId) !== entry) return
     await this.disposeWithoutFlush(entry)
