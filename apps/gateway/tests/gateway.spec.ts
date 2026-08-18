@@ -43,6 +43,8 @@ enabled('multi-tenant Cloud Gateway',()=>{
       if(envelope.method==='agentPreset.select')value={agentPreset:envelope.payload['agentPreset']}
       if(envelope.method==='session.list')value={items:[{sessionId:ownedSession},{sessionId:'foreign-session'}]}
       if(envelope.method==='session.history')value={events:[],hasMore:false}
+      if(envelope.method==='session.models')value={current:{provider:'deepseek-official',model:'deepseek-v4-flash'},routable:true,groups:[],failures:[]}
+      if(envelope.method==='subagent.list')value={entries:[],parentAvailable:true}
       if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[
         {ns:'ui-onboarding',schema:{},value:{},applies:'live',secrets:[],revision:0},
         {ns:'ui-theme',schema:{},value:{preference:'system'},applies:'live',secrets:[],revision:0},
@@ -147,6 +149,22 @@ enabled('multi-tenant Cloud Gateway',()=>{
     const envelope={type:'client-request',rpcId:randomUUID(),method:'host.describe',payload:{}}
     const response=await fetch(`${baseUrl}/api/host.describe`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(envelope)})
     expect(await response.json()).toMatchObject({result:{ok:true,value:{cwd:'/workspaces',canOpenPath:false}}})
+  })
+
+  test('hides non-durable desktop commands and materializes safe subagent reads on one Worker',async()=>{
+    for(const [method,payload,expected] of [
+      ['commands/list',{args:{agentId:ownedSession}},[]],
+      ['skill.list',{sessionId:ownedSession},{skills:[]}],
+      ['dynamicCordisRunner/inventory',{args:{}},[]],
+    ] as const){
+      const envelope={type:'client-request',rpcId:randomUUID(),method,payload}
+      const response=await fetch(`${baseUrl}/api/${method}`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify(envelope)})
+      expect(await response.json()).toMatchObject({result:{ok:true,value:expected}})
+    }
+    const rpcId=randomUUID()
+    const response=await fetch(`${baseUrl}/api/subagent.list`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId,method:'subagent.list',payload:{parentSessionId:ownedSession}})})
+    expect(await response.json()).toMatchObject({result:{ok:true,value:{entries:[],parentAvailable:true}}})
+    expect(workerRequests.get(rpcId)).toEqual({method:'subagent.list',payload:{parentSessionId:ownedSession}})
   })
 
   test('admits prompts to PostgreSQL instead of invoking the Host directly',async()=>{

@@ -17,6 +17,20 @@
 - id: sandbox
   disabled: true
 
+# The upstream desktop/Web bundle also advertises host plugin inspection,
+# per-message feedback and live permission switching. Those operations are not
+# part of this deployment's tenant-scoped cloud contract: omit their UI seats
+# instead of leaving controls that fail after a click. Session permissions stay
+# fixed by the deployment policy and ordinary Tool rendering remains enabled.
+- id: ui-settings-plugin-inventory
+  disabled: true
+
+- id: ui-message-feedback
+  disabled: true
+
+- id: ui-permission
+  disabled: true
+
 - insert:
     - id: cloud-run-context
       name: '@dsh-cloud/run-context'

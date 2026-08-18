@@ -81,6 +81,16 @@ function parseClientResponse(body: Buffer): ClientResponseEnvelope {
 
 function sessionId(envelope: Envelope): string | undefined { return typeof envelope.payload['sessionId']==='string' ? envelope.payload['sessionId'] : undefined }
 
+function auxiliarySessionId(envelope:Envelope):string|undefined{
+  if(envelope.method==='subagent.list'||envelope.method==='subagent.history')return typeof envelope.payload['parentSessionId']==='string'?envelope.payload['parentSessionId']:undefined
+  if(envelope.method==='commands/list'){
+    const args=envelope.payload['args']
+    return args!==null&&typeof args==='object'&&typeof (args as Record<string,unknown>)['agentId']==='string'?(args as Record<string,unknown>)['agentId'] as string:undefined
+  }
+  if(envelope.method==='skill.list')return sessionId(envelope)
+  return undefined
+}
+
 function cloudDirectoryPath(value: unknown): string | undefined {
   if(value===undefined)return CLOUD_WORKSPACE_ROOT
   if(typeof value!=='string')return undefined
@@ -214,6 +224,14 @@ export class CloudGateway {
     if(path!==`/api/${envelope.method}`){rpcError(response,envelope,'bad-request','RPC method does not match its HTTP route',400);return}
     if(envelope.method.startsWith('workspace.')){await this.workspace(response,principal,envelope);return}
     if(envelope.method==='host.listDirectory'||envelope.method==='host.createDirectory'){this.cloudDirectory(response,envelope);return}
+    if(envelope.method==='dynamicCordisRunner/inventory'){rpc(response,envelope,[]);return}
+    const auxiliarySid=auxiliarySessionId(envelope)
+    if(auxiliarySid!==undefined&&!await this.store.ownsSession(principal.tenantId,auxiliarySid)){rpcError(response,envelope,'session-not-found','Session was not found');return}
+    // This cloud profile exposes no user-installed slash commands or Skills.
+    // Returning an empty capability set makes the upstream UI hide the trigger
+    // instead of advertising operations that bypass durable Run admission.
+    if(envelope.method==='commands/list'){rpc(response,envelope,[]);return}
+    if(envelope.method==='skill.list'){rpc(response,envelope,{skills:[]});return}
     const sid=sessionId(envelope)
     if(SESSION_METHODS.has(envelope.method)&&(sid===undefined||!await this.store.ownsSession(principal.tenantId,sid))){rpcError(response,envelope,'session-not-found','Session was not found');return}
     if(envelope.method==='agentPreset.select'){
@@ -240,6 +258,12 @@ export class CloudGateway {
     if(envelope.method==='host.describe'){
       const upstream=await this.fetchWorker(worker,path,request,body)
       await copyResponse(upstream,response,value=>{const answer=okValue(value);if(answer!==undefined){answer['cwd']=CLOUD_WORKSPACE_ROOT;answer['canOpenPath']=false}return value});return
+    }
+    if((envelope.method==='subagent.list'||envelope.method==='subagent.history')&&auxiliarySid!==undefined){
+      const prepared=await this.fetchWorker(worker,'/api/session.models',request,Buffer.from(JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.models',payload:{sessionId:auxiliarySid}})))
+      const preparation=await prepared.json()
+      if(okValue(preparation)===undefined){json(response,prepared.status,preparation);return}
+      await copyResponse(await this.fetchWorker(worker,path,request,body),response);return
     }
     if(envelope.method==='session.create'){
       const agentPreset=envelope.payload['agentPreset']
