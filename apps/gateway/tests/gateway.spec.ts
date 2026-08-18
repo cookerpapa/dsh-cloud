@@ -44,7 +44,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
       ],authorable:true,hasDocument:true}
       if(envelope.method==='agentPreset.select')value={agentPreset:envelope.payload['agentPreset']}
       if(envelope.method==='session.list')value={items:[{sessionId:ownedSession},{sessionId:'foreign-session'}]}
-      if(envelope.method==='session.history')value={events:[],hasMore:false,projections:{asOfSeq:0,values:{permissions:{options:[{value:'read-only',name:'read-only'},{value:'workspace-write',name:'workspace-write'},{value:'danger-full-access',name:'danger-full-access'}],currentValue:'workspace-write'}}}}
+      if(envelope.method==='session.history')value={events:[],hasMore:false}
       if(envelope.method==='session.models')value={current:{provider:'deepseek-official',model:'deepseek-v4-flash'},routable:true,groups:[],failures:[]}
       if(envelope.method==='subagent.list')value={entries:[],parentAvailable:true}
       if(envelope.method==='settings.describe')value={writable:true,hasDocument:true,namespaces:[
@@ -221,7 +221,7 @@ enabled('multi-tenant Cloud Gateway',()=>{
   test('forwards tenant-owned Session reads after the ownership check',async()=>{
     const response=await fetch(`${baseUrl}/api/session.history`,{method:'POST',headers:{cookie,'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:randomUUID(),method:'session.history',payload:{sessionId:ownedSession}})})
     const value=await response.json() as {result:{ok:boolean;value:{events:unknown[]}}}
-    expect(value.result).toMatchObject({ok:true,value:{events:[],projections:{values:{permissions:{currentValue:'workspace-write',options:[{value:'workspace-write'}]}}}}})
+    expect(value.result).toMatchObject({ok:true,value:{events:[]}})
   })
 
   test('serves a cloud Workspace namespace instead of exposing Worker directories',async()=>{

@@ -34,6 +34,16 @@
 - id: ui-permission
   disabled: true
 
+# The cloud Tool Broker enforces one deployment permission envelope. Keep the
+# upstream permission service (the Agent and projection still depend on it),
+# but publish only the policy users can actually receive.
+- id: permission
+  config:
+    presets:
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+
 - insert:
     - id: cloud-run-context
       name: '@dsh-cloud/run-context'

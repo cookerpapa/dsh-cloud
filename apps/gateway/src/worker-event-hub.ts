@@ -29,18 +29,6 @@ function frameBytes(data: RawData): string {
   return data.toString('utf8')
 }
 
-function restrictPermissionProjection(value:Record<string,unknown>):void{
-  const payload=value['payload']
-  if(payload===null||typeof payload!=='object')return
-  const frame=payload as Record<string,unknown>
-  if(frame['type']!=='session/projection'||frame['key']!=='permissions')return
-  const projection=frame['value']
-  if(projection===null||typeof projection!=='object')return
-  const permissions=projection as Record<string,unknown>
-  const current=permissions['currentValue'],options=permissions['options']
-  if(typeof current==='string'&&Array.isArray(options))permissions['options']=options.filter(option=>option!==null&&typeof option==='object'&&(option as Record<string,unknown>)['value']===current)
-}
-
 /**
  * Shared live outlet for every healthy Worker. Browser sockets subscribe to the
  * fleet, never to a durable user/Session placement. PostgreSQL remains the
@@ -219,7 +207,6 @@ export class WorkerEventHub {
       await this.waitDurable(sessionId, sequence, subscriber.durableWatermark)
       subscriber.deliveredThrough.set(sessionId, sequence)
     }
-    restrictPermissionProjection(value)
     subscriber.browser.send(JSON.stringify(value), { binary: false })
   }
 }

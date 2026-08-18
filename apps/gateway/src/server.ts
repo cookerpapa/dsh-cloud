@@ -117,25 +117,6 @@ function okValue(value: unknown): Record<string,unknown>|undefined {
   const answer=(result as Record<string,unknown>)['value']; return answer!==null&&typeof answer==='object' ? answer as Record<string,unknown> : undefined
 }
 
-function fixedPermissionProjection(value:unknown):void{
-  if(value===null||typeof value!=='object')return
-  const projection=(value as Record<string,unknown>)['permissions']
-  if(projection===null||typeof projection!=='object')return
-  const permissions=projection as Record<string,unknown>
-  const current=permissions['currentValue']
-  const options=permissions['options']
-  if(typeof current!=='string'||!Array.isArray(options))return
-  permissions['options']=options.filter(option=>option!==null&&typeof option==='object'&&(option as Record<string,unknown>)['value']===current)
-}
-
-function restrictHistoryPermissions(value:unknown):unknown{
-  const answer=okValue(value)
-  const projections=answer?.['projections']
-  const values=projections!==null&&typeof projections==='object'?(projections as Record<string,unknown>)['values']:undefined
-  fixedPermissionProjection(values)
-  return value
-}
-
 function workspaceView(item:WorkspaceRecord):Record<string,unknown>{
   return {workspaceId:item.id,path:'/workspace',title:item.name,sessionIds:item.sessionIds,createdAt:item.createdAt,updatedAt:item.updatedAt}
 }
@@ -326,7 +307,7 @@ export class CloudGateway {
       return
     }
     if(SESSION_METHODS.has(envelope.method)){
-      await copyResponse(await this.fetchWorker(worker,path,request,body),response,envelope.method==='session.history'?restrictHistoryPermissions:undefined)
+      await copyResponse(await this.fetchWorker(worker,path,request,body),response)
       return
     }
     if(envelope.method==='agentPreset.list'){
